@@ -131,6 +131,12 @@
         </p>
     </div>
     {% endif %}
+
+    {% if solicitud %}
+    <div class="caso-info-card">
+        {% include "SIAPE/includes/seccion_historial_comentarios_docente.html" %}
+    </div>
+    {% endif %}
     
     <!-- Entrevistas -->
     {% if entrevistas %}

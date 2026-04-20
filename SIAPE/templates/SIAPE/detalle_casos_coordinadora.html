@@ -380,6 +380,12 @@
             </a>
         </div>
 
+        <div class="grid-column-full mt-20">
+            {% with historial_comentarios_docente=solicitud.historial_comentarios_docente.all %}
+                {% include "SIAPE/includes/seccion_historial_comentarios_docente.html" %}
+            {% endwith %}
+        </div>
+
     </div>
 
     <!-- Modal para Formular Ajuste (Coordinador Técnico Pedagógico) -->

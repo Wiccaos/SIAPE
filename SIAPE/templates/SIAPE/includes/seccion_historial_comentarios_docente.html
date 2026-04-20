@@ -1,0 +1,28 @@
+{# Variable: historial_comentarios_docente (queryset o lista) #}
+<div class="panel-section seccion-historial-docente" id="seccion-historial-docente">
+    <h3><i class="fas fa-comments"></i> Comentarios y decisiones del docente</h3>
+    <p class="text-muted text-small" style="margin-bottom: 1rem;">
+        Registro cronológico de observaciones al equipo y de aprobaciones o rechazos sobre cada ajuste.
+    </p>
+    {% if historial_comentarios_docente %}
+        <div class="historial-docente-lista">
+            {% for h in historial_comentarios_docente %}
+            <div class="historial-docente-item">
+                <div class="historial-docente-meta">
+                    <span class="historial-docente-fecha">{{ h.created_at|date:"d/m/Y H:i" }}</span>
+                    <span class="historial-docente-tipo">{{ h.get_tipo_display }}</span>
+                    {% if h.ajuste_asignado.ajuste_razonable.categorias_ajustes %}
+                    <span class="historial-docente-cat">{{ h.ajuste_asignado.ajuste_razonable.categorias_ajustes.nombre_categoria }}</span>
+                    {% endif %}
+                    {% if h.docente.usuario %}
+                    <span class="historial-docente-nombre">{{ h.docente.usuario.first_name }} {{ h.docente.usuario.last_name }}</span>
+                    {% endif %}
+                </div>
+                <div class="historial-docente-texto">{{ h.texto|linebreaksbr }}</div>
+            </div>
+            {% endfor %}
+        </div>
+    {% else %}
+        <p class="text-small text-muted" style="margin: 0;">Aún no hay comentarios ni decisiones registradas por docentes en este caso.</p>
+    {% endif %}
+</div>

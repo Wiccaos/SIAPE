@@ -1,6 +1,7 @@
 from django.db import models
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.conf import settings
+from django.utils import timezone
 import uuid
 
 # --- Modelo Usuario ---
@@ -530,3 +531,76 @@ class DecisionDocenteAjuste(models.Model):
     
     def __str__(self):
         return f"{self.docente} - {self.get_decision_display()} - {self.ajuste_asignado}"
+
+
+class Notificacion(models.Model):
+    """Notificaciones por rol (campana del header)."""
+    TIPO_CHOICES = (
+        ('nuevo_caso', 'Nuevo caso'),
+        ('devolucion', 'Devolución'),
+        ('comentario_docente', 'Comentario del docente'),
+    )
+
+    rol_destino = models.CharField(max_length=100)
+    solicitud = models.ForeignKey(
+        Solicitudes,
+        on_delete=models.CASCADE,
+        related_name='notificaciones',
+    )
+    tipo = models.CharField(max_length=30, choices=TIPO_CHOICES)
+    titulo = models.CharField(max_length=191)
+    mensaje = models.TextField(blank=True, default='')
+    leida = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'notificaciones'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.tipo} → {self.rol_destino}: {self.titulo[:50]}'
+
+
+class ComentarioDocenteHistorial(models.Model):
+    """Cada observación o decisión del docente queda registrada (orden cronológico)."""
+    TIPO_OBSERVACION = 'observacion'
+    TIPO_DECISION = 'decision'
+    TIPO_CHOICES = (
+        (TIPO_OBSERVACION, 'Observación al equipo'),
+        (TIPO_DECISION, 'Decisión sobre ajuste'),
+    )
+
+    solicitud = models.ForeignKey(
+        Solicitudes,
+        on_delete=models.CASCADE,
+        related_name='historial_comentarios_docente',
+    )
+    ajuste_asignado = models.ForeignKey(
+        AjusteAsignado,
+        on_delete=models.CASCADE,
+        related_name='historial_comentarios_docente',
+    )
+    docente = models.ForeignKey(
+        'PerfilUsuario',
+        on_delete=models.CASCADE,
+        related_name='comentarios_docente_historial',
+        limit_choices_to={'rol__nombre_rol': 'Docente'},
+    )
+    tipo = models.CharField(max_length=20, choices=TIPO_CHOICES)
+    decision_codigo = models.CharField(
+        max_length=15,
+        blank=True,
+        default='',
+        verbose_name='Código decisión',
+        help_text='aprobado/rechazado solo si tipo es decisión',
+    )
+    texto = models.TextField()
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        db_table = 'comentario_docente_historial'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.get_tipo_display()} — caso {self.solicitud_id}'

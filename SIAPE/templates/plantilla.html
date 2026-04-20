@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="{% static 'CSS/base.css' %}">
+    <link rel="stylesheet" href="{% static 'CSS/base.css' %}?v={{ STATIC_CACHE_BUST }}">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
     <link rel="icon" href="{% static 'images/logo-simple.png' %}" type="image/png">
     <title>{% block title %}SIAPE{% endblock %}</title>
@@ -41,6 +41,32 @@
                         <strong class="user-role">Usuario</strong> 
                         <span class="user-name">{{ user.email }}</span>
                     {% endif %}
+                </div>
+
+                <div class="header-dropdown header-notificaciones">
+                    <button type="button" class="header-config-link header-notif-btn" title="Notificaciones">
+                        <i class="fas fa-bell"></i>
+                        {% if notificaciones_no_leidas_count %}
+                        <span class="header-notif-badge">{{ notificaciones_no_leidas_count }}</span>
+                        {% endif %}
+                    </button>
+                    <div class="dropdown-menu dropdown-menu-notificaciones">
+                        {% if notificaciones_header %}
+                            {% for n in notificaciones_header %}
+                            <div class="notif-item{% if not n.leida %} notif-no-leida{% endif %}">
+                                <a href="{% url 'detalle_caso' n.solicitud_id %}" class="notif-link">{{ n.titulo }}</a>
+                                <p class="notif-msg">{{ n.mensaje|truncatechars:140 }}</p>
+                                <form method="post" action="{% url 'marcar_notificacion_leida' n.id %}" class="notif-marcar-form">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="next" value="{{ request.path }}">
+                                    <button type="submit" class="notif-marcar-btn">Marcar leída</button>
+                                </form>
+                            </div>
+                            {% endfor %}
+                        {% else %}
+                            <div class="dropdown-item notif-vacio">Sin notificaciones recientes.</div>
+                        {% endif %}
+                    </div>
                 </div>
                 
                 <!-- NUEVO: Contenedor del Dropdown de Configuración -->
@@ -146,9 +172,9 @@
       <p>&copy; 2025 - SIAPE - Desarrollado por F. Vidal, I. Zárate, N. Ríos</p>
     </footer>
 
-    <script src="{% static 'JS/base.js' %}"></script>
-    <script src="{% static 'JS/table_tooltips.js' %}"></script>
-    <script src="{% static 'JS/pagination_scroll.js' %}"></script>
+    <script src="{% static 'JS/base.js' %}?v={{ STATIC_CACHE_BUST }}"></script>
+    <script src="{% static 'JS/table_tooltips.js' %}?v={{ STATIC_CACHE_BUST }}"></script>
+    <script src="{% static 'JS/pagination_scroll.js' %}?v={{ STATIC_CACHE_BUST }}"></script>
     
     {% block extra_scripts %}{% endblock %}
 

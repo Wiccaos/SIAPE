@@ -38,7 +38,9 @@
             <h3 class="detalle-titulo">Ajustes Razonables Aprobados (Relevantes para tus clases)</h3>
             <ul>
                 {% for ajuste_asignado in ajustes %}
-                    <li>{{ ajuste_asignado.ajuste_razonable.descripcion }}</li>
+                    <li style="margin-bottom: 1rem;">
+                        {{ ajuste_asignado.ajuste_razonable.descripcion }}
+                    </li>
                 {% empty %}
                     <li>No se encontraron ajustes aprobados para este estudiante en tus asignaturas.</li>
                 {% endfor %}

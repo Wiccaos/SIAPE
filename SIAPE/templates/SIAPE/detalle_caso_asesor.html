@@ -81,7 +81,10 @@
             <h3 class="detalle-titulo">SOLUCIONES:</h3>
             <ul>
                 {% for ajuste in ajustes %}
-                    <li>{{ ajuste.ajuste_razonable.descripcion }}</li>
+                    <li style="margin-bottom: 1rem;">
+                        <strong>{{ ajuste.ajuste_razonable.categorias_ajustes.nombre_categoria }}:</strong>
+                        {{ ajuste.ajuste_razonable.descripcion }}
+                    </li>
                 {% empty %}
                     <li>Aún no se han asignado soluciones.</li>
                 {% endfor %}

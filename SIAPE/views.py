@@ -10,7 +10,7 @@ from django.urls import reverse
 from django.http import HttpResponse, JsonResponse
 from datetime import timedelta, datetime, time, date
 from collections import Counter
-from django.db.models import Count, Q
+from django.db.models import Count, Q, Prefetch
 from django.views.decorators.http import require_POST
 from django.views.decorators.csrf import csrf_exempt
 from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
@@ -48,7 +48,8 @@ from .serializer import (
 from .validators import validar_rut_chileno, validar_contraseña, traducir_feriado_chileno
 from .models import(
     Usuario, PerfilUsuario, Roles, Areas, CategoriasAjustes, Carreras, Estudiantes, Solicitudes, Evidencias,
-    Asignaturas, AsignaturasEnCurso, Entrevistas, AjusteRazonable, AjusteAsignado, HorarioBloqueado, DecisionDocenteAjuste, SEMESTRE_CHOICES
+    Asignaturas, AsignaturasEnCurso, Entrevistas, AjusteRazonable, AjusteAsignado, HorarioBloqueado, DecisionDocenteAjuste,
+    Notificacion, ComentarioDocenteHistorial, SEMESTRE_CHOICES,
 )  
 
 # Permisos personalizados
@@ -64,6 +65,45 @@ ROL_DOCENTE = 'Docente'
 ROL_ADMIN = 'Administrador'
 ROL_COORDINADORA = 'Encargado de Inclusión'
 ROL_COORDINADOR_TECNICO_PEDAGOGICO = 'Coordinador Técnico Pedagógico'
+
+ROLES_QUE_VEN_COMENTARIO_DOCENTE = (
+    ROL_COORDINADORA,
+    ROL_COORDINADOR_TECNICO_PEDAGOGICO,
+    ROL_ASESOR,
+    ROL_DIRECTOR,
+)
+
+
+def _crear_notificacion(rol_destino, tipo, titulo, mensaje, solicitud):
+    Notificacion.objects.create(
+        rol_destino=rol_destino,
+        tipo=tipo,
+        titulo=titulo[:191],
+        mensaje=(mensaje or '')[:2000],
+        solicitud=solicitud,
+    )
+
+
+def notificar_comentario_docente_a_equipo(solicitud, texto_resumen, nombre_docente):
+    titulo = f'Comentario de docente — caso #{solicitud.id}'
+    cuerpo = f'{nombre_docente}: {texto_resumen[:400]}'
+    for rol in ROLES_QUE_VEN_COMENTARIO_DOCENTE:
+        _crear_notificacion(rol, 'comentario_docente', titulo, cuerpo, solicitud)
+
+
+def registrar_historial_comentario_docente(solicitud, ajuste, docente, tipo, texto, decision_codigo='', momento=None):
+    h = ComentarioDocenteHistorial(
+        solicitud=solicitud,
+        ajuste_asignado=ajuste,
+        docente=docente,
+        tipo=tipo,
+        decision_codigo=decision_codigo or '',
+        texto=(texto or '')[:8000],
+    )
+    if momento is not None:
+        h.created_at = momento
+    h.save()
+    return h
 
 
 # ------------ FUNCIONES UTILITARIAS ------------
@@ -142,6 +182,13 @@ class PublicSolicitudCreateView(APIView):
             serializer = PublicaSolicitudSerializer(data=request.data)
             if serializer.is_valid():
                 solicitud = serializer.save()
+                _crear_notificacion(
+                    ROL_COORDINADORA,
+                    'nuevo_caso',
+                    f'Nueva solicitud #{solicitud.id}',
+                    (solicitud.asunto or '')[:500],
+                    solicitud,
+                )
 
                 return Response(
                     {
@@ -605,6 +652,7 @@ def seguimiento_caso_estudiante(request):
                     'solicitud': None,
                     'ajustes_aprobados': [],
                     'entrevistas': [],
+                    'historial_comentarios_docente': [],
                     'error': error
                 }
                 return render(request, 'SIAPE/seguimiento_caso.html', context)
@@ -618,6 +666,7 @@ def seguimiento_caso_estudiante(request):
                     'solicitud': None,
                     'ajustes_aprobados': [],
                     'entrevistas': [],
+                    'historial_comentarios_docente': [],
                     'error': error
                 }
                 return render(request, 'SIAPE/seguimiento_caso.html', context)
@@ -630,6 +679,7 @@ def seguimiento_caso_estudiante(request):
                     'solicitud': None,
                     'ajustes_aprobados': [],
                     'entrevistas': [],
+                    'historial_comentarios_docente': [],
                     'error': error
                 }
                 return render(request, 'SIAPE/seguimiento_caso.html', context)
@@ -659,7 +709,10 @@ def seguimiento_caso_estudiante(request):
                         ajustes_aprobados = AjusteAsignado.objects.filter(
                             solicitudes=solicitud,
                             estado_aprobacion='aprobado'
-                        ).select_related('ajuste_razonable__categorias_ajustes')
+                        ).select_related(
+                            'ajuste_razonable__categorias_ajustes',
+                            'docente_comentador__usuario',
+                        ).prefetch_related('decisiones_docente__docente__usuario')
                         
                         # Obtener las entrevistas relacionadas
                         entrevistas = Entrevistas.objects.filter(
@@ -672,13 +725,23 @@ def seguimiento_caso_estudiante(request):
         else:
             error = 'Por favor, complete todos los campos.'
     
+    historial_comentarios_docente = []
+    if solicitud:
+        historial_comentarios_docente = list(
+            ComentarioDocenteHistorial.objects.filter(solicitud=solicitud).select_related(
+                'docente__usuario',
+                'ajuste_asignado__ajuste_razonable__categorias_ajustes',
+            ).order_by('-created_at')
+        )
+
     context = {
         'solicitud': solicitud,
         'ajustes_aprobados': ajustes_aprobados,
         'entrevistas': entrevistas if solicitud else [],
+        'historial_comentarios_docente': historial_comentarios_docente,
         'error': error
     }
-    
+
     return render(request, 'SIAPE/seguimiento_caso.html', context)
 
 def redireccionamiento_por_rol(request):
@@ -2085,14 +2148,16 @@ def detalle_casos_encargado_inclusion(request, solicitud_id):
             solicitudes=solicitud,
             estado_aprobacion='aprobado'
         ).select_related(
-            'ajuste_razonable', 
-            'ajuste_razonable__categorias_ajustes'
-        )
+            'ajuste_razonable',
+            'ajuste_razonable__categorias_ajustes',
+            'docente_comentador__usuario',
+        ).prefetch_related('decisiones_docente__docente__usuario')
     else:
         ajustes = AjusteAsignado.objects.filter(solicitudes=solicitud).select_related(
-            'ajuste_razonable', 
-            'ajuste_razonable__categorias_ajustes'
-        )
+            'ajuste_razonable',
+            'ajuste_razonable__categorias_ajustes',
+            'docente_comentador__usuario',
+        ).prefetch_related('decisiones_docente__docente__usuario')
     
     # Obtenemos todas las evidencias
     evidencias = Evidencias.objects.filter(solicitudes=solicitud)
@@ -2159,10 +2224,18 @@ def detalle_casos_encargado_inclusion(request, solicitud_id):
     # El Director puede desactivar casos aprobados para enviarlos a revisión
     puede_desactivar_caso = rol_nombre == ROL_DIRECTOR and solicitud.estado == 'aprobado'
 
+    historial_comentarios_docente = ComentarioDocenteHistorial.objects.filter(
+        solicitud=solicitud,
+    ).select_related(
+        'docente__usuario',
+        'ajuste_asignado__ajuste_razonable__categorias_ajustes',
+    ).order_by('-created_at')
+
     context = {
         'solicitud': solicitud,
         'estudiante': estudiante,
         'ajustes_asignados': ajustes,
+        'historial_comentarios_docente': historial_comentarios_docente,
         'evidencias': evidencias,
         'entrevistas_list': entrevistas,
         'categorias_ajustes': categorias_ajustes, # Para el modal
@@ -2637,7 +2710,14 @@ def devolver_a_encargado_inclusion(request, solicitud_id):
         # 4. --- Cambiar el estado del caso ---
         solicitud.estado = 'pendiente_formulacion_caso'
         solicitud.save()
-        
+        _crear_notificacion(
+            ROL_COORDINADORA,
+            'devolucion',
+            f'Caso #{solicitud.id} devuelto',
+            'Un caso le fue devuelto desde Coordinación Técnico Pedagógica.',
+            solicitud,
+        )
+
         messages.success(request, 'Caso devuelto al Encargado de Inclusión exitosamente. El caso ahora está pendiente de formulación del caso.')
         
     except Exception as e:
@@ -2717,7 +2797,14 @@ def devolver_a_coordinador_tecnico_pedagogico(request, solicitud_id):
         # 4. --- Cambiar el estado del caso ---
         solicitud.estado = 'pendiente_formulacion_ajustes'
         solicitud.save()
-        
+        _crear_notificacion(
+            ROL_COORDINADOR_TECNICO_PEDAGOGICO,
+            'devolucion',
+            f'Caso #{solicitud.id} devuelto',
+            'Un caso le fue devuelto desde Asesoría Pedagógica.',
+            solicitud,
+        )
+
         messages.success(request, 'Caso devuelto al Asesor Técnico Pedagógico exitosamente. El caso ahora está pendiente de formulación de ajustes.')
         
     except Exception as e:
@@ -2927,7 +3014,14 @@ def rechazar_caso(request, solicitud_id):
         # 4. --- Cambiar el estado del caso (vuelve a Asesoría Pedagógica) ---
         solicitud.estado = 'pendiente_preaprobacion'
         solicitud.save()
-        
+        _crear_notificacion(
+            ROL_ASESOR,
+            'devolucion',
+            f'Caso #{solicitud.id} rechazado por Director',
+            'El Director de Carrera rechazó el caso; vuelve a Asesoría Pedagógica.',
+            solicitud,
+        )
+
         messages.warning(request, 'Caso rechazado. El caso ha sido devuelto a Asesoría Pedagógica para evaluación de corrección o archivo.')
         
     except Exception as e:
@@ -2968,7 +3062,14 @@ def desactivar_caso(request, solicitud_id):
         # 4. --- Cambiar el estado del caso (vuelve a Asesoría Pedagógica para revisión) ---
         solicitud.estado = 'pendiente_preaprobacion'
         solicitud.save()
-        
+        _crear_notificacion(
+            ROL_ASESOR,
+            'devolucion',
+            f'Caso #{solicitud.id} enviado a revisión',
+            'El Director desactivó un caso aprobado; requiere revisión en Asesoría Pedagógica.',
+            solicitud,
+        )
+
         messages.warning(request, 'Caso desactivado. El caso ha sido enviado a revisión por Asesoría Pedagógica.')
         
     except Exception as e:
@@ -8014,6 +8115,9 @@ def obtener_datos_caso_docente(request, solicitud_id):
         # Obtener la decisión del docente actual para este ajuste
         decision_docente = ajuste.decisiones_docente.filter(docente=perfil_docente).first()
         
+        dc_docente = decision_docente.docente if decision_docente else None
+        dc_usuario = dc_docente.usuario if dc_docente else None
+        com_usr = ajuste.docente_comentador.usuario if ajuste.docente_comentador else None
         ajustes_data.append({
             'id': ajuste.id,
             'categoria': ajuste.ajuste_razonable.categorias_ajustes.nombre_categoria,
@@ -8023,9 +8127,34 @@ def obtener_datos_caso_docente(request, solicitud_id):
             'decision_docente_display': decision_docente.get_decision_display() if decision_docente else None,
             'comentario_docente': decision_docente.comentario or '' if decision_docente else '',
             'fecha_decision_docente': decision_docente.fecha_decision.strftime('%d/%m/%Y %H:%M') if decision_docente and decision_docente.fecha_decision else None,
-            'docente': decision_docente.docente.usuario.get_full_name() if decision_docente and decision_docente.docente.usuario else None
+            'docente': dc_usuario.get_full_name() if dc_usuario else None,
+            'comentarios_ajuste_docente': ajuste.comentarios_docente or '',
+            'fecha_comentario_ajuste': ajuste.fecha_comentario_docente.strftime('%d/%m/%Y %H:%M') if ajuste.fecha_comentario_docente else None,
+            'docente_comentador_nombre': com_usr.get_full_name() if com_usr else None,
         })
-    
+
+    historial_qs = ComentarioDocenteHistorial.objects.filter(solicitud=solicitud).select_related(
+        'docente__usuario',
+        'ajuste_asignado__ajuste_razonable__categorias_ajustes',
+    ).order_by('-created_at')
+    historial_data = []
+    for h in historial_qs:
+        du = h.docente.usuario if h.docente else None
+        cat = None
+        try:
+            cat = h.ajuste_asignado.ajuste_razonable.categorias_ajustes.nombre_categoria
+        except AttributeError:
+            pass
+        historial_data.append({
+            'tipo': h.tipo,
+            'tipo_display': h.get_tipo_display(),
+            'texto': h.texto,
+            'fecha': timezone.localtime(h.created_at).strftime('%d/%m/%Y %H:%M'),
+            'decision_codigo': h.decision_codigo or None,
+            'categoria_ajuste': cat,
+            'docente_nombre': du.get_full_name() if du else '',
+        })
+
     # Preparar respuesta
     data = {
         'estudiante': {
@@ -8036,10 +8165,94 @@ def obtener_datos_caso_docente(request, solicitud_id):
         },
         'descripcion_caso': solicitud.descripcion or 'No hay descripción disponible.',
         'ajustes': ajustes_data,
-        'tiene_ajustes': len(ajustes_data) > 0
+        'tiene_ajustes': len(ajustes_data) > 0,
+        'historial_comentarios_docente': historial_data,
     }
-    
+
     return Response(data, status=status.HTTP_200_OK)
+
+
+@login_required
+@require_POST
+def marcar_notificacion_leida(request, notificacion_id):
+    notif = get_object_or_404(Notificacion, pk=notificacion_id)
+    try:
+        rol = request.user.perfil.rol.nombre_rol
+    except AttributeError:
+        return redirect('home')
+    if notif.rol_destino != rol:
+        return HttpResponse('No autorizado', status=403)
+    notif.leida = True
+    notif.save(update_fields=['leida', 'updated_at'])
+    destino = request.POST.get('next') or request.META.get('HTTP_REFERER')
+    if destino:
+        return redirect(destino)
+    return redirect('home')
+
+
+@csrf_exempt
+@login_required
+@require_POST
+def agregar_comentario_ajuste_docente(request, ajuste_asignado_id):
+    """Guarda observación del docente en el ajuste (visible para el equipo) y notifica."""
+    if not request.user.is_authenticated:
+        return JsonResponse({'error': 'No autenticado'}, status=401)
+    try:
+        if request.user.perfil.rol.nombre_rol != ROL_DOCENTE:
+            return JsonResponse({'error': 'No autorizado'}, status=403)
+    except AttributeError:
+        return JsonResponse({'error': 'No autorizado'}, status=403)
+
+    perfil_docente = request.user.perfil
+    try:
+        body = json.loads(request.body or '{}')
+        texto = (body.get('comentario') or '').strip()
+    except json.JSONDecodeError:
+        texto = (request.POST.get('comentario') or '').strip()
+    if not texto:
+        return JsonResponse({'error': 'El comentario no puede estar vacío.'}, status=400)
+
+    try:
+        ajuste = AjusteAsignado.objects.select_related('solicitudes__estudiantes').get(
+            id=ajuste_asignado_id,
+            estado_aprobacion='aprobado',
+            solicitudes__estado='aprobado',
+        )
+    except AjusteAsignado.DoesNotExist:
+        return JsonResponse({'error': 'Ajuste no encontrado'}, status=404)
+
+    mis_asignaturas = Asignaturas.objects.filter(docente=perfil_docente)
+    if not AsignaturasEnCurso.objects.filter(
+        estudiantes=ajuste.solicitudes.estudiantes,
+        asignaturas__in=mis_asignaturas,
+    ).exists():
+        return JsonResponse({'error': 'No autorizado'}, status=403)
+
+    ajuste.comentarios_docente = texto
+    ajuste.docente_comentador = perfil_docente
+    ajuste.fecha_comentario_docente = timezone.now()
+    ajuste.save(update_fields=['comentarios_docente', 'docente_comentador', 'fecha_comentario_docente', 'updated_at'])
+
+    registrar_historial_comentario_docente(
+        ajuste.solicitudes,
+        ajuste,
+        perfil_docente,
+        ComentarioDocenteHistorial.TIPO_OBSERVACION,
+        texto,
+        momento=ajuste.fecha_comentario_docente,
+    )
+
+    docente_nombre = perfil_docente.usuario.get_full_name() or 'Docente'
+    notificar_comentario_docente_a_equipo(ajuste.solicitudes, texto, docente_nombre)
+
+    return JsonResponse({
+        'success': True,
+        'message': 'Comentario guardado.',
+        'comentarios_ajuste_docente': ajuste.comentarios_docente,
+        'fecha_comentario_ajuste': ajuste.fecha_comentario_docente.strftime('%d/%m/%Y %H:%M'),
+        'docente_comentador_nombre': docente_nombre,
+    })
+
 
 @csrf_exempt
 @login_required
@@ -8147,17 +8360,41 @@ def decision_docente_ajuste(request, ajuste_asignado_id):
         
         # Recargar el objeto desde la base de datos
         decision_obj.refresh_from_db()
-        
+
     except Exception as e:
         # Log del error para debugging
         logging.error(f'Error al guardar decisión del docente: {str(e)}')
         return JsonResponse({
             'error': f'Error al guardar la decisión: {str(e)}'
         }, status=500)
-    
+
+    if comentario:
+        texto_hist = f'Decisión: {decision_obj.get_decision_display()}. {comentario}'.strip()
+    elif decision == 'aprobado':
+        texto_hist = 'Aprobó el ajuste sin comentario adicional.'
+    else:
+        texto_hist = comentario or f'Decisión: {decision_obj.get_decision_display()}.'
+    registrar_historial_comentario_docente(
+        ajuste.solicitudes,
+        ajuste,
+        perfil_docente,
+        ComentarioDocenteHistorial.TIPO_DECISION,
+        texto_hist,
+        decision_codigo=decision,
+        momento=decision_obj.fecha_decision,
+    )
+
+    if comentario:
+        docente_nombre = perfil_docente.usuario.get_full_name() or 'Docente'
+        notificar_comentario_docente_a_equipo(
+            ajuste.solicitudes,
+            f'(Decisión: {decision}) {comentario}',
+            docente_nombre,
+        )
+
     # Formatear la fecha para la respuesta
     fecha_decision_str = decision_obj.fecha_decision.strftime('%d/%m/%Y %H:%M') if decision_obj.fecha_decision else None
-    
+
     return JsonResponse({
         'success': True,
         'message': f'Ajuste {decision_obj.get_decision_display().lower()} exitosamente',
@@ -8274,12 +8511,20 @@ def dashboard_docente(request):
             'ajustes_aprobados_detalle': detalles
         })
 
+    historial_mis_comentarios = ComentarioDocenteHistorial.objects.filter(
+        docente=perfil_docente,
+    ).select_related(
+        'solicitud__estudiantes',
+        'ajuste_asignado__ajuste_razonable__categorias_ajustes',
+    ).order_by('-created_at')[:400]
+
     context = {
         'casos_por_asignatura': casos_por_asignatura,
-        'asignaturas_docente': mis_asignaturas, 
-        'total_estudiantes_con_ajuste': len(total_estudiantes_con_caso)  # Cambiado para reflejar casos aprobados
+        'asignaturas_docente': mis_asignaturas,
+        'total_estudiantes_con_ajuste': len(total_estudiantes_con_caso),  # Cambiado para reflejar casos aprobados
+        'historial_mis_comentarios': historial_mis_comentarios,
     }
-    
+
     return render(request, 'SIAPE/dashboard_docente.html', context)
 
 @login_required
@@ -8505,7 +8750,13 @@ def detalle_ajuste_docente(request, estudiante_id):
         estado='aprobado',
         asignaturas_solicitadas__in=mis_asignaturas
     ).prefetch_related(
-        'ajusteasignado_set__ajuste_razonable'
+        Prefetch(
+            'ajusteasignado_set',
+            queryset=AjusteAsignado.objects.select_related(
+                'ajuste_razonable__categorias_ajustes',
+                'docente_comentador__usuario',
+            ).prefetch_related('decisiones_docente__docente__usuario'),
+        ),
     ).distinct()
 
     # 3. Juntar todos los ajustes aprobados en una sola lista 

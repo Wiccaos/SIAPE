@@ -585,6 +585,169 @@ body.accessibility-mode .btn-accion:focus {
     color: #333;
 }
 
+/* --- Notificaciones (header) --- */
+.header-notif-btn {
+    position: relative;
+}
+.header-notif-badge {
+    position: absolute;
+    top: -4px;
+    right: -6px;
+    background: #c00;
+    color: #fff;
+    font-size: 0.65rem;
+    min-width: 1.1rem;
+    height: 1.1rem;
+    line-height: 1.1rem;
+    text-align: center;
+    border-radius: 999px;
+    padding: 0 4px;
+}
+.dropdown-menu-notificaciones {
+    min-width: 300px;
+    max-width: 360px;
+    max-height: 70vh;
+    overflow-y: auto;
+    right: 0;
+    left: auto;
+}
+.notif-item {
+    padding: 10px 14px;
+    border-bottom: 1px solid #eee;
+    font-size: 0.9rem;
+}
+.notif-item.notif-no-leida {
+    background: #fff8f8;
+}
+.notif-link {
+    font-weight: 600;
+    color: #c00;
+    text-decoration: none;
+    display: block;
+    margin-bottom: 4px;
+}
+.notif-link:hover {
+    text-decoration: underline;
+}
+.notif-msg {
+    margin: 0 0 8px 0;
+    color: #555;
+    font-size: 0.85rem;
+}
+.notif-marcar-form {
+    margin: 0;
+}
+.notif-marcar-btn {
+    font-size: 0.75rem;
+    padding: 4px 8px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    background: #f8f9fa;
+    cursor: pointer;
+}
+.notif-marcar-btn:hover {
+    background: #e9ecef;
+}
+.notif-vacio {
+    padding: 12px 14px;
+    color: #666;
+    font-size: 0.9rem;
+}
+body.dark-mode .notif-item {
+    border-bottom-color: #444;
+}
+body.dark-mode .notif-item.notif-no-leida {
+    background: #2a2222;
+}
+body.dark-mode .notif-msg {
+    color: #ccc;
+}
+
+.modal-comentario-ajuste-equipo {
+    margin-top: 12px;
+    padding: 10px;
+    background: #f0f7ff;
+    border-radius: 6px;
+    border-left: 3px solid #0d6efd;
+}
+.modal-subtitulo-comentario {
+    margin: 0 0 8px 0;
+    font-size: 0.95rem;
+    color: #0d6efd;
+}
+.modal-meta-comentario {
+    font-size: 0.8rem;
+    color: #666;
+    margin: 4px 0 8px 0;
+}
+.text-muted-small {
+    font-size: 0.85rem;
+    color: #888;
+    margin: 0 0 8px 0;
+}
+body.dark-mode .modal-comentario-ajuste-equipo {
+    background: #1a2530;
+    border-left-color: #4dabf7;
+}
+body.dark-mode .modal-subtitulo-comentario {
+    color: #74c0fc;
+}
+
+.modal-historial-lista {
+    max-height: 280px;
+    overflow-y: auto;
+}
+.modal-historial-item {
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    background: #f8f9fa;
+    border-radius: 6px;
+    border-left: 3px solid #6c757d;
+}
+body.dark-mode .modal-historial-item {
+    background: #2a2a2a;
+    border-left-color: #adb5bd;
+}
+
+.seccion-historial-docente .historial-docente-lista {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.historial-docente-item {
+    padding: 12px 14px;
+    background: #fafbfc;
+    border-radius: 8px;
+    border: 1px solid #e9ecef;
+}
+.historial-docente-meta {
+    font-size: 0.8rem;
+    color: #666;
+    margin-bottom: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+}
+.historial-docente-meta span {
+    white-space: nowrap;
+}
+.historial-docente-tipo {
+    font-weight: 600;
+    color: #c00;
+}
+.historial-docente-texto {
+    font-size: 0.95rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+}
+body.dark-mode .historial-docente-item {
+    background: #252525;
+    border-color: #444;
+}
+body.dark-mode .historial-docente-meta {
+    color: #bbb;
+}
+
 /* --- Footer Unificado --- */
 .app-footer {
     text-align: center;

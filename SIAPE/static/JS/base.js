@@ -96,30 +96,38 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    const dropdown = document.querySelector('.header-dropdown');
-    if (dropdown) {
-        const dropdownButton = dropdown.querySelector('.header-config-link');
-        const dropdownMenu = dropdown.querySelector('.dropdown-menu');
-
-        // 1. Abre/Cierra el menú al hacer clic en el botón
-        dropdownButton.addEventListener('click', (e) => {
-            e.stopPropagation(); // Evita que el clic se propague al 'window'
-            dropdownMenu.classList.toggle('show');
-        });
-
-        // 2. Cierra el menú si se hace clic en cualquier otro lugar
-        window.addEventListener('click', (e) => {
-            if (dropdownMenu.classList.contains('show') && !dropdown.contains(e.target)) {
-                dropdownMenu.classList.remove('show');
-                // También cerrar el submenú de accesibilidad
-                if (accessibilitySubmenu) {
-                    accessibilitySubmenu.classList.remove('show');
-                    const chevron = accessibilityToggle?.querySelector('.accessibility-chevron');
-                    if (chevron) {
-                        chevron.classList.remove('rotated');
-                    }
-                }
+    const dropdowns = document.querySelectorAll('.header-dropdown');
+    if (dropdowns.length > 0) {
+        dropdowns.forEach((dropdown) => {
+            const dropdownButton = dropdown.querySelector('.header-config-link');
+            const dropdownMenu = dropdown.querySelector('.dropdown-menu');
+            if (!dropdownButton || !dropdownMenu) {
+                return;
             }
+            dropdownButton.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const shouldOpen = !dropdownMenu.classList.contains('show');
+                dropdowns.forEach((d) => {
+                    const otherMenu = d.querySelector('.dropdown-menu');
+                    if (otherMenu) {
+                        otherMenu.classList.remove('show');
+                    }
+                });
+                if (shouldOpen) {
+                    dropdownMenu.classList.add('show');
+                }
+            });
+        });
+        window.addEventListener('click', (e) => {
+            dropdowns.forEach((dropdown) => {
+                const dropdownMenu = dropdown.querySelector('.dropdown-menu');
+                if (!dropdownMenu) {
+                    return;
+                }
+                if (dropdownMenu.classList.contains('show') && !dropdown.contains(e.target)) {
+                    dropdownMenu.classList.remove('show');
+                }
+            });
         });
     }
 });

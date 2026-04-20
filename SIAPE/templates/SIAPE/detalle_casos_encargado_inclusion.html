@@ -247,7 +247,6 @@
                                     <p style="margin: 5px 0 0 0; font-size: 0.9em;">{{ item.comentarios_director }}</p>
                                 </div>
                             {% endif %}
-                            
                             {% if puede_aprobar and item.estado_aprobacion == 'pendiente' %}
                             <div style="margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
                                 <button type="button" class="btn-accion btn-accion-small btn-accion-green" onclick="abrirModalAprobarAjuste({{ item.id }}, '{{ item.ajuste_razonable.descripcion|truncatewords:10|escapejs }}')" style="padding: 5px 10px; font-size: 0.85em;">
@@ -494,6 +493,10 @@
             <a href="{% url 'casos_generales' %}" class="btn-volver">
                 <i class="fas fa-chevron-left"></i> Volver a la lista de Casos
             </a>
+        </div>
+
+        <div class="grid-column-full mt-20">
+            {% include "SIAPE/includes/seccion_historial_comentarios_docente.html" %}
         </div>
 
     </div>

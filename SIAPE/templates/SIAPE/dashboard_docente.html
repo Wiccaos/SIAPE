@@ -6,8 +6,8 @@
 {% endblock %}
 
 {% block content %}
-<div class="main-content"> 
-    
+<div class="main-content">
+    <form class="csrf-docente-hidden" style="display:none;">{% csrf_token %}</form>
     <nav class="dashboard-nav">
         <a href="{% url 'dashboard_docente' %}" class="nav-item active">
             <i class="fas fa-home"></i>
@@ -42,6 +42,42 @@
                 <span class="kpi-label">Alumnos con Ajuste</span>
             </div>
         </div>
+    </section>
+
+    <section class="table-container" style="margin-top: 24px;">
+        <div class="table-header">
+            <h2><i class="fas fa-comments"></i> Mis comentarios y decisiones</h2>
+        </div>
+        {% if historial_mis_comentarios %}
+        <table class="custom-table">
+            <thead>
+                <tr>
+                    <th>Fecha</th>
+                    <th>Tipo</th>
+                    <th>Estudiante</th>
+                    <th>Categoría ajuste</th>
+                    <th>Resumen</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for h in historial_mis_comentarios %}
+                <tr>
+                    <td>{{ h.created_at|date:"d/m/Y H:i" }}</td>
+                    <td>{{ h.get_tipo_display }}</td>
+                    <td>{{ h.solicitud.estudiantes.nombres }} {{ h.solicitud.estudiantes.apellidos }}</td>
+                    <td>{{ h.ajuste_asignado.ajuste_razonable.categorias_ajustes.nombre_categoria }}</td>
+                    <td style="max-width: 280px; white-space: pre-wrap;">{{ h.texto|truncatechars:180 }}</td>
+                    <td>
+                        <a href="{% url 'detalle_caso' h.solicitud_id %}" class="btn-accion btn-accion-gray btn-accion-small">Ver caso</a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p class="text-muted" style="padding: 1rem 0;">Aún no registras observaciones ni decisiones en la plataforma.</p>
+        {% endif %}
     </section>
 
     <section class="table-container" style="margin-top: 30px;">
@@ -237,6 +273,45 @@
 </style>
 
 <script>
+function escapeHtml(text) {
+    if (!text) return '';
+    const d = document.createElement('div');
+    d.textContent = text;
+    return d.innerHTML;
+}
+
+function guardarComentarioAjusteDocente(ajusteId) {
+    const ta = document.getElementById('comentario-ajuste-interno-' + ajusteId);
+    if (!ta) return;
+    const comentario = ta.value.trim();
+    if (!comentario) {
+        alert('Escriba una observación antes de guardar.');
+        return;
+    }
+    const tok = getCookie('csrftoken');
+    fetch(`/api/docente/ajuste/${ajusteId}/comentario/`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': tok || ''
+        },
+        credentials: 'same-origin',
+        body: JSON.stringify({ comentario: comentario })
+    })
+    .then((r) => r.json().then((j) => ({ ok: r.ok, j })))
+    .then(({ ok, j }) => {
+        if (ok && j.success) {
+            alert(j.message || 'Guardado.');
+            const modalBody = document.getElementById('modalCasoDocenteBody');
+            const sid = modalBody && modalBody.getAttribute('data-solicitud-id');
+            if (sid) abrirModalCasoDocente(parseInt(sid, 10));
+        } else {
+            alert((j && j.error) || 'Error al guardar');
+        }
+    })
+    .catch(() => alert('Error de red al guardar el comentario.'));
+}
+
 function abrirModalCasoDocente(solicitudId) {
     const modal = document.getElementById('modalCasoDocente');
     const modalBody = document.getElementById('modalCasoDocenteBody');
@@ -276,7 +351,17 @@ function abrirModalCasoDocente(solicitudId) {
                 const tieneDecision = ajuste.decision_docente !== null && ajuste.decision_docente !== undefined;
                 const esAprobado = ajuste.decision_docente === 'aprobado';
                 const esRechazado = ajuste.decision_docente === 'rechazado';
-                
+                const bloqueComentarioEquipo = `
+                    <div class="modal-comentario-ajuste-equipo">
+                        <h5 class="modal-subtitulo-comentario"><i class="fas fa-comment-dots"></i> Observación al equipo</h5>
+                        ${ajuste.comentarios_ajuste_docente ? `
+                            <div class="modal-comentario-texto">${escapeHtml(ajuste.comentarios_ajuste_docente)}</div>
+                            <p class="modal-meta-comentario">${escapeHtml(ajuste.fecha_comentario_ajuste || '')}${ajuste.docente_comentador_nombre ? ' · ' + escapeHtml(ajuste.docente_comentador_nombre) : ''}</p>
+                        ` : '<p class="text-muted-small">Sin observaciones previas.</p>'}
+                        <textarea id="comentario-ajuste-interno-${ajuste.id}" class="modal-textarea-comentario" rows="3" placeholder="Observación para Encargado de Inclusión, CTP, Asesor o Director..."></textarea>
+                        <button type="button" class="btn-accion btn-accion-gray btn-accion-small" style="margin-top:8px;" onclick="guardarComentarioAjusteDocente(${ajuste.id})"><i class="fas fa-save"></i> Guardar observación</button>
+                    </div>
+                `;
                 // Mostrar estado de la decisión si existe
                 const estadoHTML = tieneDecision ? `
                     <div class="modal-decision-docente">
@@ -290,7 +375,7 @@ function abrirModalCasoDocente(solicitudId) {
                         ${esRechazado && ajuste.comentario_docente ? `
                             <div class="modal-decision-comentario">
                                 <strong>Motivo del rechazo:</strong>
-                                <div class="modal-comentario-texto">${ajuste.comentario_docente}</div>
+                                <div class="modal-comentario-texto">${escapeHtml(ajuste.comentario_docente)}</div>
                             </div>
                         ` : ''}
                     </div>
@@ -304,6 +389,7 @@ function abrirModalCasoDocente(solicitudId) {
                         <div class="modal-ajuste-descripcion">
                             ${ajuste.descripcion}
                         </div>
+                        ${bloqueComentarioEquipo}
                         ${estadoHTML}
                         <div class="modal-decision-acciones">
                             ${!tieneDecision || esRechazado ? `
@@ -329,6 +415,26 @@ function abrirModalCasoDocente(solicitudId) {
                 </div>
             `;
         }
+
+        const hist = Array.isArray(data.historial_comentarios_docente) ? data.historial_comentarios_docente : [];
+        const historialModalHTML = hist.length ? `
+            <div class="modal-seccion">
+                <h4><i class="fas fa-history"></i> Historial de comentarios y decisiones (este caso)</h4>
+                <div class="modal-historial-lista">
+                ${hist.map((h) => `
+                    <div class="modal-historial-item">
+                        <div class="modal-meta-comentario">${escapeHtml(h.fecha)} · ${escapeHtml(h.tipo_display)}${h.categoria_ajuste ? ' · ' + escapeHtml(h.categoria_ajuste) : ''}${h.docente_nombre ? ' · ' + escapeHtml(h.docente_nombre) : ''}</div>
+                        <div class="modal-comentario-texto" style="margin-top:6px;">${escapeHtml(h.texto)}</div>
+                    </div>
+                `).join('')}
+                </div>
+            </div>
+        ` : `
+            <div class="modal-seccion">
+                <h4><i class="fas fa-history"></i> Historial de comentarios y decisiones</h4>
+                <p class="text-muted-small">Sin registros aún en este caso.</p>
+            </div>
+        `;
         
         modalBody.innerHTML = `
             <div class="modal-estudiante-info">
@@ -352,6 +458,7 @@ function abrirModalCasoDocente(solicitudId) {
                 <h4><i class="fas fa-tools"></i> Ajustes Asignados</h4>
                 ${ajustesHTML}
             </div>
+            ${historialModalHTML}
         `;
         
         // Guardar el ID de la solicitud para poder recargar después de una decisión
@@ -382,8 +489,12 @@ window.onclick = function(event) {
     }
 }
 
-// Función helper para obtener cookie CSRF
+// CSRF: con sesión, el token suele estar solo en el input oculto del formulario.
 function getCookie(name) {
+    if (name === 'csrftoken') {
+        const inp = document.querySelector('[name=csrfmiddlewaretoken]');
+        if (inp && inp.value) return inp.value;
+    }
     let cookieValue = null;
     if (document.cookie && document.cookie !== '') {
         const cookies = document.cookie.split(';');
@@ -393,13 +504,6 @@ function getCookie(name) {
                 cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
                 break;
             }
-        }
-    }
-    // Si no se encuentra en cookies, intentar obtener del meta tag
-    if (!cookieValue) {
-        const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
-        if (csrfToken) {
-            cookieValue = csrfToken.value;
         }
     }
     return cookieValue;
