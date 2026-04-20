@@ -42,6 +42,38 @@
                         <span class="user-name">{{ user.email }}</span>
                     {% endif %}
                 </div>
+
+                <div class="header-dropdown">
+                    <button type="button" class="header-config-link header-notification-link">
+                        <i class="fas fa-bell"></i>
+                        <span class="btn-text">Notificaciones</span>
+                        {% if notificaciones_no_leidas_count > 0 %}
+                            <span class="notification-badge">{{ notificaciones_no_leidas_count }}</span>
+                        {% endif %}
+                    </button>
+                    <div class="dropdown-menu notifications-menu">
+                        {% if notificaciones_header %}
+                            {% for notificacion in notificaciones_header %}
+                                <form method="post" action="{% url 'marcar_notificacion_leida' notificacion.id %}" class="notification-form">
+                                    {% csrf_token %}
+                                    <button type="submit" class="dropdown-item notification-item {% if not notificacion.leida %}unread{% endif %}">
+                                        <i class="fas fa-circle"></i>
+                                        <span>
+                                            <strong>{{ notificacion.titulo }}</strong><br>
+                                            {{ notificacion.mensaje|default:"Caso actualizado" }}<br>
+                                            <small>{{ notificacion.created_at|date:"d/m/Y H:i" }}</small>
+                                        </span>
+                                    </button>
+                                </form>
+                            {% endfor %}
+                        {% else %}
+                            <div class="dropdown-item notification-empty">
+                                <i class="fas fa-check-circle"></i>
+                                <span>No tienes notificaciones pendientes.</span>
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
                 
                 <!-- NUEVO: Contenedor del Dropdown de Configuración -->
                 <div class="header-dropdown">

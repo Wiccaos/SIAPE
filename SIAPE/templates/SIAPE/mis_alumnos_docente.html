@@ -100,6 +100,10 @@
     </div>
 </div>
 
+<div id="csrf-token-holder-docente" style="display: none;">
+    {% csrf_token %}
+</div>
+
 
 <script>
 function abrirModalCasoDocente(solicitudId) {
@@ -241,6 +245,15 @@ function getCookie(name) {
     return cookieValue;
 }
 
+function getCSRFToken() {
+    const tokenFromCookie = getCookie('csrftoken');
+    if (tokenFromCookie) return tokenFromCookie;
+
+    const tokenInput = document.querySelector('#csrf-token-holder-docente input[name="csrfmiddlewaretoken"]');
+    if (tokenInput && tokenInput.value) return tokenInput.value;
+    return '';
+}
+
 // Función para abrir el formulario de comentario
 function abrirFormularioComentario(ajusteId, tieneComentario) {
     const ajusteItem = document.querySelector(`[data-ajuste-id="${ajusteId}"]`);
@@ -311,55 +324,57 @@ function guardarComentario(ajusteId) {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'X-CSRFToken': getCookie('csrftoken')
+            'X-CSRFToken': getCSRFToken()
         },
         credentials: 'same-origin',
         body: JSON.stringify({
             comentario: comentario
         })
     })
-    .then(response => response.json())
+    .then(async response => {
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(data.error || data.detail || 'No se pudo guardar el comentario.');
+        }
+        return data;
+    })
     .then(data => {
-        if (data.success) {
-            // Actualizar la interfaz con el nuevo comentario
-            const ajusteItem = document.querySelector(`[data-ajuste-id="${ajusteId}"]`);
-            if (ajusteItem) {
-                // Remover formulario
-                const formulario = ajusteItem.querySelector('.modal-formulario-comentario');
-                if (formulario) formulario.remove();
-                
-                // Actualizar o crear sección de comentario
-                let comentarioDiv = ajusteItem.querySelector('.modal-comentario-docente');
-                if (!comentarioDiv) {
-                    comentarioDiv = document.createElement('div');
-                    comentarioDiv.className = 'modal-comentario-docente';
-                    const accionesDiv = ajusteItem.querySelector('.modal-comentario-acciones');
-                    accionesDiv.insertAdjacentElement('beforebegin', comentarioDiv);
-                }
-                
-                comentarioDiv.innerHTML = `
-                    <div class="modal-comentario-header">
-                        <strong><i class="fas fa-comment"></i> Mi Comentario:</strong>
-                        <span class="modal-comentario-fecha">${data.fecha_comentario}</span>
-                    </div>
-                    <div class="modal-comentario-texto">${data.comentario}</div>
-                `;
-                
-                // Actualizar botón
-                const btnComentario = ajusteItem.querySelector('.btn-comentario');
-                if (btnComentario) {
-                    btnComentario.innerHTML = '<i class="fas fa-edit"></i> Editar Comentario';
-                }
+        // Actualizar la interfaz con el nuevo comentario
+        const ajusteItem = document.querySelector(`[data-ajuste-id="${ajusteId}"]`);
+        if (ajusteItem) {
+            // Remover formulario
+            const formulario = ajusteItem.querySelector('.modal-formulario-comentario');
+            if (formulario) formulario.remove();
+            
+            // Actualizar o crear sección de comentario
+            let comentarioDiv = ajusteItem.querySelector('.modal-comentario-docente');
+            if (!comentarioDiv) {
+                comentarioDiv = document.createElement('div');
+                comentarioDiv.className = 'modal-comentario-docente';
+                const accionesDiv = ajusteItem.querySelector('.modal-comentario-acciones');
+                accionesDiv.insertAdjacentElement('beforebegin', comentarioDiv);
             }
             
-            alert('Comentario guardado exitosamente.');
-        } else {
-            alert('Error al guardar el comentario: ' + (data.error || 'Error desconocido'));
+            comentarioDiv.innerHTML = `
+                <div class="modal-comentario-header">
+                    <strong><i class="fas fa-comment"></i> Mi Comentario:</strong>
+                    <span class="modal-comentario-fecha">${data.fecha_comentario}</span>
+                </div>
+                <div class="modal-comentario-texto">${data.comentario}</div>
+            `;
+            
+            // Actualizar botón
+            const btnComentario = ajusteItem.querySelector('.btn-comentario');
+            if (btnComentario) {
+                btnComentario.innerHTML = '<i class="fas fa-edit"></i> Editar Comentario';
+            }
         }
+        
+        alert('Comentario guardado exitosamente.');
     })
     .catch(error => {
-        console.error('Error:', error);
-        alert('Error al guardar el comentario. Por favor, intente nuevamente.');
+        console.error('Error al guardar comentario:', error);
+        alert(`Error al guardar el comentario: ${error.message}`);
     })
     .finally(() => {
         // Rehabilitar botones

@@ -247,6 +247,22 @@
                                     <p style="margin: 5px 0 0 0; font-size: 0.9em;">{{ item.comentarios_director }}</p>
                                 </div>
                             {% endif %}
+                            {% if item.comentarios_docente %}
+                                <div style="margin-top: 10px; padding: 10px; background-color: #f5f8ff; border-radius: 5px; border-left: 3px solid #17a2b8;">
+                                    <p style="margin: 0; font-weight: bold; font-size: 0.9em;">
+                                        <i class="fas fa-chalkboard-teacher"></i> Comentario del Docente
+                                    </p>
+                                    <p style="margin: 5px 0 0 0; font-size: 0.9em;">{{ item.comentarios_docente }}</p>
+                                    <p class="text-small text-muted" style="margin: 8px 0 0 0;">
+                                        {% if item.docente_comentador %}
+                                            {{ item.docente_comentador.usuario.first_name }} {{ item.docente_comentador.usuario.last_name }}
+                                        {% endif %}
+                                        {% if item.fecha_comentario_docente %}
+                                            · {{ item.fecha_comentario_docente|date:"d/m/Y H:i" }}
+                                        {% endif %}
+                                    </p>
+                                </div>
+                            {% endif %}
                             
                             {% if puede_aprobar and item.estado_aprobacion == 'pendiente' %}
                             <div style="margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
@@ -487,6 +503,38 @@
                     {% endif %}
                 {% endif %}
 
+            </div>
+        </div>
+
+        <div class="detalle-card-full-width">
+            <div class="panel-section">
+                <h3><i class="fas fa-chalkboard-teacher"></i> Comentarios del Docente</h3>
+                <div class="detalle-card-content">
+                    {% if comentarios_docente_list %}
+                        {% for comentario in comentarios_docente_list %}
+                            <div class="detalle-sub-card" style="border-left: 4px solid #17a2b8;">
+                                <p>
+                                    <strong>{{ comentario.ajuste_razonable.categorias_ajustes.nombre_categoria }}</strong>
+                                </p>
+                                <pre class="notas-box">{{ comentario.comentarios_docente }}</pre>
+                                <p class="text-small text-muted">
+                                    {% if comentario.docente_comentador %}
+                                        {{ comentario.docente_comentador.usuario.first_name }} {{ comentario.docente_comentador.usuario.last_name }}
+                                    {% else %}
+                                        Docente
+                                    {% endif %}
+                                    {% if comentario.fecha_comentario_docente %}
+                                        · {{ comentario.fecha_comentario_docente|date:"d/m/Y H:i" }}
+                                    {% endif %}
+                                </p>
+                            </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="empty-state p-10">
+                            <p class="text-small">Aún no hay comentarios registrados por docentes en este caso.</p>
+                        </div>
+                    {% endif %}
+                </div>
             </div>
         </div>
         

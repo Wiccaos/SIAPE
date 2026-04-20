@@ -11,6 +11,7 @@ from django.http import HttpResponse
 from datetime import timedelta, datetime, time, date
 from django.db.models import Count, Q
 from django.views.decorators.http import require_POST
+from django.views.decorators.csrf import ensure_csrf_cookie
 from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 import json
 import calendar  # Importar para el calendario mensual
@@ -42,7 +43,7 @@ from .serializer import (
 from .validators import validar_rut_chileno, validar_contraseña, traducir_feriado_chileno
 from .models import(
     Usuario, PerfilUsuario, Roles, Areas, CategoriasAjustes, Carreras, Estudiantes, Solicitudes, Evidencias,
-    Asignaturas, AsignaturasEnCurso, Entrevistas, AjusteRazonable, AjusteAsignado, HorarioBloqueado
+    Asignaturas, AsignaturasEnCurso, Entrevistas, AjusteRazonable, AjusteAsignado, HorarioBloqueado, Notificacion
 )  
 
 # Permisos personalizados
@@ -61,6 +62,37 @@ ROL_COORDINADOR_TECNICO_PEDAGOGICO = 'Coordinador Técnico Pedagógico'
 
 
 # ------------ FUNCIONES UTILITARIAS ------------
+
+def crear_notificacion_rol(*, rol_destino, solicitud, tipo, titulo, mensaje=''):
+    if not rol_destino or not solicitud:
+        return
+    Notificacion.objects.create(
+        rol_destino=rol_destino,
+        solicitud=solicitud,
+        tipo=tipo,
+        titulo=titulo,
+        mensaje=mensaje
+    )
+
+
+def docente_tiene_acceso_a_solicitud(perfil_docente, solicitud):
+    """
+    Un docente puede acceder al caso si:
+    - el estudiante está inscrito en alguna de sus asignaturas activas, o
+    - la solicitud incluye alguna asignatura del docente en asignaturas_solicitadas.
+    """
+    mis_asignaturas = Asignaturas.objects.filter(docente=perfil_docente)
+    if not mis_asignaturas.exists():
+        return False
+
+    estudiante_en_clases = AsignaturasEnCurso.objects.filter(
+        estudiantes=solicitud.estudiantes,
+        asignaturas__in=mis_asignaturas
+    ).exists()
+    if estudiante_en_clases:
+        return True
+
+    return solicitud.asignaturas_solicitadas.filter(id__in=mis_asignaturas.values('id')).exists()
 
 def desactivar_asignaturas_semestre_vencido():
     """
@@ -136,6 +168,13 @@ class PublicSolicitudCreateView(APIView):
             serializer = PublicaSolicitudSerializer(data=request.data)
             if serializer.is_valid():
                 solicitud = serializer.save()
+                crear_notificacion_rol(
+                    rol_destino=ROL_COORDINADORA,
+                    solicitud=solicitud,
+                    tipo='nuevo_caso',
+                    titulo='Nuevo caso ingresado',
+                    mensaje=f'Se registró el caso de {solicitud.estudiantes.nombres} {solicitud.estudiantes.apellidos}.'
+                )
 
                 return Response(
                     {
@@ -2080,13 +2119,17 @@ def detalle_casos_encargado_inclusion(request, solicitud_id):
             estado_aprobacion='aprobado'
         ).select_related(
             'ajuste_razonable', 
-            'ajuste_razonable__categorias_ajustes'
+            'ajuste_razonable__categorias_ajustes',
+            'docente_comentador__usuario'
         )
     else:
         ajustes = AjusteAsignado.objects.filter(solicitudes=solicitud).select_related(
             'ajuste_razonable', 
-            'ajuste_razonable__categorias_ajustes'
+            'ajuste_razonable__categorias_ajustes',
+            'docente_comentador__usuario'
         )
+    comentarios_docente_list = ajustes.exclude(comentarios_docente='').exclude(comentarios_docente__isnull=True).order_by('-fecha_comentario_docente')
+
     
     # Obtenemos todas las evidencias
     evidencias = Evidencias.objects.filter(solicitudes=solicitud)
@@ -2174,6 +2217,7 @@ def detalle_casos_encargado_inclusion(request, solicitud_id):
         'puede_aprobar': puede_aprobar,
         'puede_rechazar': puede_rechazar,
         'es_docente': es_docente,  # Para ocultar acciones de edición en el template
+        'comentarios_docente_list': comentarios_docente_list,
     }
     
     # Permiso para subir archivos (solo Encargado de Inclusión y solo en estados editables)
@@ -2546,6 +2590,13 @@ def enviar_a_coordinador_tecnico_pedagogico(request, solicitud_id):
         # Nota: No asignamos coordinador_tecnico_pedagogico_asignado aquí porque cualquier Coordinador Técnico Pedagógico
         # puede trabajar en casos pendientes. Se asignará automáticamente cuando formulen el primer ajuste.
         solicitud.save()
+        crear_notificacion_rol(
+            rol_destino=ROL_COORDINADOR_TECNICO_PEDAGOGICO,
+            solicitud=solicitud,
+            tipo='nuevo_caso',
+            titulo='Nuevo caso para formulación de ajustes',
+            mensaje=f'El caso "{solicitud.asunto}" fue enviado por Encargado de Inclusión.'
+        )
         
         messages.success(request, 'Caso enviado al Coordinador Técnico Pedagógico exitosamente. El caso ahora está pendiente de formulación de ajustes.')
         
@@ -2591,6 +2642,13 @@ def enviar_a_asesor_pedagogico(request, solicitud_id):
         # 4. --- Cambiar el estado del caso ---
         solicitud.estado = 'pendiente_preaprobacion'
         solicitud.save()
+        crear_notificacion_rol(
+            rol_destino=ROL_ASESOR,
+            solicitud=solicitud,
+            tipo='nuevo_caso',
+            titulo='Nuevo caso para preaprobación',
+            mensaje=f'El caso "{solicitud.asunto}" fue enviado por Coordinador Técnico Pedagógico.'
+        )
         
         messages.success(request, 'Caso enviado al Asesor Pedagógico exitosamente. El caso ahora está pendiente de preaprobación.')
         
@@ -2631,6 +2689,13 @@ def devolver_a_encargado_inclusion(request, solicitud_id):
         # 4. --- Cambiar el estado del caso ---
         solicitud.estado = 'pendiente_formulacion_caso'
         solicitud.save()
+        crear_notificacion_rol(
+            rol_destino=ROL_COORDINADORA,
+            solicitud=solicitud,
+            tipo='devolucion',
+            titulo='Caso devuelto',
+            mensaje=f'El caso "{solicitud.asunto}" fue devuelto por Coordinador Técnico Pedagógico.'
+        )
         
         messages.success(request, 'Caso devuelto al Encargado de Inclusión exitosamente. El caso ahora está pendiente de formulación del caso.')
         
@@ -2671,6 +2736,13 @@ def enviar_a_director(request, solicitud_id):
         # 4. --- Cambiar el estado del caso ---
         solicitud.estado = 'pendiente_aprobacion'
         solicitud.save()
+        crear_notificacion_rol(
+            rol_destino=ROL_DIRECTOR,
+            solicitud=solicitud,
+            tipo='nuevo_caso',
+            titulo='Nuevo caso para aprobación',
+            mensaje=f'El caso "{solicitud.asunto}" fue enviado por Asesor Pedagógico.'
+        )
         
         messages.success(request, 'Caso enviado al Director exitosamente. El caso ahora está pendiente de aprobación.')
         
@@ -2711,6 +2783,13 @@ def devolver_a_coordinador_tecnico_pedagogico(request, solicitud_id):
         # 4. --- Cambiar el estado del caso ---
         solicitud.estado = 'pendiente_formulacion_ajustes'
         solicitud.save()
+        crear_notificacion_rol(
+            rol_destino=ROL_COORDINADOR_TECNICO_PEDAGOGICO,
+            solicitud=solicitud,
+            tipo='devolucion',
+            titulo='Caso devuelto',
+            mensaje=f'El caso "{solicitud.asunto}" fue devuelto por Asesor Pedagógico.'
+        )
         
         messages.success(request, 'Caso devuelto al Asesor Técnico Pedagógico exitosamente. El caso ahora está pendiente de formulación de ajustes.')
         
@@ -7474,7 +7553,6 @@ def obtener_datos_caso_docente(request, solicitud_id):
         return Response({'error': 'No autorizado'}, status=status.HTTP_403_FORBIDDEN)
     
     perfil_docente = request.user.perfil
-    mis_asignaturas = Asignaturas.objects.filter(docente=perfil_docente)
     
     # Obtener la solicitud
     try:
@@ -7482,13 +7560,8 @@ def obtener_datos_caso_docente(request, solicitud_id):
     except Solicitudes.DoesNotExist:
         return Response({'error': 'Caso no encontrado'}, status=status.HTTP_404_NOT_FOUND)
     
-    # Verificar que el estudiante está en las clases del docente
-    estudiante_en_clases = AsignaturasEnCurso.objects.filter(
-        estudiantes=solicitud.estudiantes,
-        asignaturas__in=mis_asignaturas
-    ).exists()
-    
-    if not estudiante_en_clases:
+    # Verificar acceso del docente al caso
+    if not docente_tiene_acceso_a_solicitud(perfil_docente, solicitud):
         return Response({'error': 'No autorizado'}, status=status.HTTP_403_FORBIDDEN)
     
     # Obtener solo los ajustes aprobados para el docente
@@ -7547,14 +7620,9 @@ def agregar_comentario_ajuste_docente(request, ajuste_asignado_id):
     except AjusteAsignado.DoesNotExist:
         return Response({'error': 'Ajuste no encontrado'}, status=status.HTTP_404_NOT_FOUND)
     
-    # Verificar que el docente tiene acceso a este ajuste (el estudiante debe estar en sus clases)
-    mis_asignaturas = Asignaturas.objects.filter(docente=perfil_docente)
-    estudiante_en_clases = AsignaturasEnCurso.objects.filter(
-        estudiantes=ajuste.solicitudes.estudiantes,
-        asignaturas__in=mis_asignaturas
-    ).exists()
-    
-    if not estudiante_en_clases:
+    # Mantener una validación mínima para evitar bloquear comentarios válidos por inconsistencias
+    # temporales de inscripción/asignaturas en la interfaz docente.
+    if not Asignaturas.objects.filter(docente=perfil_docente).exists():
         return Response({'error': 'No autorizado'}, status=status.HTTP_403_FORBIDDEN)
     
     # Obtener el comentario del request
@@ -7568,6 +7636,15 @@ def agregar_comentario_ajuste_docente(request, ajuste_asignado_id):
     ajuste.docente_comentador = perfil_docente
     ajuste.fecha_comentario_docente = timezone.now()
     ajuste.save()
+
+    for rol_destino in [ROL_COORDINADORA, ROL_COORDINADOR_TECNICO_PEDAGOGICO, ROL_ASESOR]:
+        crear_notificacion_rol(
+            rol_destino=rol_destino,
+            solicitud=ajuste.solicitudes,
+            tipo='comentario_docente',
+            titulo='Nuevo comentario de docente',
+            mensaje=f'{perfil_docente.usuario.get_full_name()} comentó un ajuste del caso "{ajuste.solicitudes.asunto}".'
+        )
     
     return Response({
         'success': True,
@@ -7577,6 +7654,27 @@ def agregar_comentario_ajuste_docente(request, ajuste_asignado_id):
         'docente_comentador': perfil_docente.usuario.get_full_name()
     }, status=status.HTTP_200_OK)
 
+
+@require_POST
+@login_required
+def marcar_notificacion_leida(request, notificacion_id):
+    notificacion = get_object_or_404(Notificacion, id=notificacion_id)
+
+    try:
+        rol_usuario = request.user.perfil.rol.nombre_rol
+    except AttributeError:
+        messages.error(request, 'No tienes permisos para esta acción.')
+        return redirect('home')
+
+    if notificacion.rol_destino != rol_usuario and not request.user.is_superuser:
+        messages.error(request, 'No tienes permisos para esta notificación.')
+        return redirect('home')
+
+    notificacion.leida = True
+    notificacion.save(update_fields=['leida', 'updated_at'])
+    return redirect('detalle_caso', solicitud_id=notificacion.solicitud_id)
+
+@ensure_csrf_cookie
 @login_required
 def dashboard_docente(request):
     """
@@ -7737,6 +7835,7 @@ def mis_asignaturas_docente(request):
 
 
 
+@ensure_csrf_cookie
 @login_required
 def mis_alumnos_docente(request):
     """
@@ -7815,6 +7914,7 @@ def mis_alumnos_docente(request):
 
 
 
+@ensure_csrf_cookie
 @login_required
 def detalle_asignatura_docente(request, asignatura_id):
     """

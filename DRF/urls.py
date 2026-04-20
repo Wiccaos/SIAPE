@@ -51,6 +51,7 @@ urlpatterns = [
     path('api/docente/caso/<int:solicitud_id>/', views.obtener_datos_caso_docente, name='api-datos-caso-docente'),
     path('api/docente/ajuste/<int:ajuste_asignado_id>/comentario/', views.agregar_comentario_ajuste_docente, name='api-comentario-ajuste-docente'),
     path('api/buscar-estudiante/', views.buscar_estudiante_por_rut, name='api-buscar-estudiante'),
+    path('notificaciones/<int:notificacion_id>/leer/', views.marcar_notificacion_leida, name='marcar_notificacion_leida'),
 
     # URLs del Administrador
     path('dashboard/admin/', views.dashboard_admin, name='dashboard_admin'),

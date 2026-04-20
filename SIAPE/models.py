@@ -478,3 +478,31 @@ class AjusteAsignado(models.Model):
 
     def __str__(self):
         return f"Ajuste asignado a {self.solicitudes}"
+
+
+class Notificacion(models.Model):
+    TIPO_CHOICES = (
+        ('nuevo_caso', 'Nuevo caso'),
+        ('devolucion', 'Devolución'),
+        ('comentario_docente', 'Comentario del docente'),
+    )
+
+    rol_destino = models.CharField(max_length=100)
+    solicitud = models.ForeignKey(
+        Solicitudes,
+        on_delete=models.CASCADE,
+        related_name='notificaciones'
+    )
+    tipo = models.CharField(max_length=30, choices=TIPO_CHOICES)
+    titulo = models.CharField(max_length=191)
+    mensaje = models.TextField(blank=True, default='')
+    leida = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'notificaciones'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.get_tipo_display()} - {self.rol_destino} - Caso #{self.solicitud_id}"

@@ -132,6 +132,10 @@
     </div>
 </div>
 
+<div id="csrf-token-holder-docente" style="display: none;">
+    {% csrf_token %}
+</div>
+
 <style>
 .modal {
     display: none;
@@ -278,19 +282,34 @@ function abrirModalCasoDocente(solicitudId) {
         let ajustesHTML = '';
         if (data.tiene_ajustes && data.ajustes && data.ajustes.length > 0) {
             ajustesHTML = data.ajustes.map(ajuste => {
-                // Escapar HTML para seguridad
                 const categoria = ajuste.categoria || 'Sin categoría';
                 const descripcion = ajuste.descripcion || 'Sin descripción';
+                const tieneComentario = ajuste.comentarios_docente && ajuste.comentarios_docente.trim() !== '';
+                const comentarioHTML = tieneComentario ? `
+                    <div class="modal-comentario-docente">
+                        <div class="modal-comentario-header">
+                            <strong><i class="fas fa-comment"></i> Mi Comentario:</strong>
+                            ${ajuste.fecha_comentario_docente ? `<span class="modal-comentario-fecha">${ajuste.fecha_comentario_docente}</span>` : ''}
+                        </div>
+                        <div class="modal-comentario-texto">${ajuste.comentarios_docente}</div>
+                    </div>
+                ` : '';
                 return `
-                <div class="modal-ajuste-item">
-                    <div class="modal-ajuste-categoria">
-                        <i class="fas fa-tag"></i> ${categoria}
+                    <div class="modal-ajuste-item" data-ajuste-id="${ajuste.id}">
+                        <div class="modal-ajuste-categoria">
+                            <i class="fas fa-tag"></i> ${categoria}
+                        </div>
+                        <div class="modal-ajuste-descripcion">
+                            ${descripcion}
+                        </div>
+                        ${comentarioHTML}
+                        <div class="modal-comentario-acciones">
+                            <button type="button" class="btn-comentario" onclick="abrirFormularioComentario(${ajuste.id}, ${tieneComentario ? 'true' : 'false'})">
+                                <i class="fas fa-${tieneComentario ? 'edit' : 'comment'}"></i> ${tieneComentario ? 'Editar Comentario' : 'Agregar Comentario'}
+                            </button>
+                        </div>
                     </div>
-                    <div class="modal-ajuste-descripcion">
-                        ${descripcion}
-                    </div>
-                </div>
-            `;
+                `;
             }).join('');
         } else {
             ajustesHTML = `
@@ -365,6 +384,112 @@ function getCookie(name) {
         }
     }
     return cookieValue;
+}
+
+function getCSRFToken() {
+    const tokenFromCookie = getCookie('csrftoken');
+    if (tokenFromCookie) return tokenFromCookie;
+    const tokenInput = document.querySelector('#csrf-token-holder-docente input[name="csrfmiddlewaretoken"]');
+    if (tokenInput && tokenInput.value) return tokenInput.value;
+    return '';
+}
+
+function abrirFormularioComentario(ajusteId, tieneComentario) {
+    const ajusteItem = document.querySelector(`[data-ajuste-id="${ajusteId}"]`);
+    if (!ajusteItem) return;
+
+    let formularioExistente = ajusteItem.querySelector('.modal-formulario-comentario');
+    if (formularioExistente) {
+        formularioExistente.style.display = 'block';
+        return;
+    }
+
+    const comentarioActual = ajusteItem.querySelector('.modal-comentario-texto');
+    const textoActual = comentarioActual ? comentarioActual.textContent.trim() : '';
+
+    const formulario = document.createElement('div');
+    formulario.className = 'modal-formulario-comentario';
+    formulario.innerHTML = `
+        <div class="modal-formulario-comentario-content">
+            <label for="comentario-${ajusteId}"><strong>${tieneComentario ? 'Editar' : 'Agregar'} Comentario:</strong></label>
+            <textarea id="comentario-${ajusteId}" class="modal-textarea-comentario" rows="4" placeholder="Ej: Aprobado, realizaré el ajuste. / Necesito equipo especial para...">${textoActual}</textarea>
+            <div class="modal-formulario-comentario-botones">
+                <button type="button" class="btn-comentario btn-comentario-guardar" onclick="guardarComentario(${ajusteId})">
+                    <i class="fas fa-save"></i> Guardar
+                </button>
+                <button type="button" class="btn-comentario btn-comentario-cancelar" onclick="cerrarFormularioComentario(${ajusteId})">
+                    <i class="fas fa-times"></i> Cancelar
+                </button>
+            </div>
+        </div>
+    `;
+
+    const accionesDiv = ajusteItem.querySelector('.modal-comentario-acciones');
+    accionesDiv.insertAdjacentElement('afterend', formulario);
+}
+
+function cerrarFormularioComentario(ajusteId) {
+    const ajusteItem = document.querySelector(`[data-ajuste-id="${ajusteId}"]`);
+    if (!ajusteItem) return;
+    const formulario = ajusteItem.querySelector('.modal-formulario-comentario');
+    if (formulario) formulario.style.display = 'none';
+}
+
+function guardarComentario(ajusteId) {
+    const textarea = document.getElementById(`comentario-${ajusteId}`);
+    if (!textarea) return;
+
+    const comentario = textarea.value.trim();
+    if (!comentario) {
+        alert('Por favor, ingrese un comentario.');
+        return;
+    }
+
+    fetch(`/api/docente/ajuste/${ajusteId}/comentario/`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': getCSRFToken()
+        },
+        credentials: 'same-origin',
+        body: JSON.stringify({ comentario: comentario })
+    })
+    .then(async response => {
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'No se pudo guardar el comentario.');
+        }
+        return data;
+    })
+    .then(data => {
+        const ajusteItem = document.querySelector(`[data-ajuste-id="${ajusteId}"]`);
+        if (!ajusteItem) return;
+
+        const formulario = ajusteItem.querySelector('.modal-formulario-comentario');
+        if (formulario) formulario.remove();
+
+        let comentarioDiv = ajusteItem.querySelector('.modal-comentario-docente');
+        if (!comentarioDiv) {
+            comentarioDiv = document.createElement('div');
+            comentarioDiv.className = 'modal-comentario-docente';
+            const accionesDiv = ajusteItem.querySelector('.modal-comentario-acciones');
+            accionesDiv.insertAdjacentElement('beforebegin', comentarioDiv);
+        }
+
+        comentarioDiv.innerHTML = `
+            <div class="modal-comentario-header">
+                <strong><i class="fas fa-comment"></i> Mi Comentario:</strong>
+                <span class="modal-comentario-fecha">${data.fecha_comentario}</span>
+            </div>
+            <div class="modal-comentario-texto">${data.comentario}</div>
+        `;
+
+        const btnComentario = ajusteItem.querySelector('.btn-comentario');
+        if (btnComentario) btnComentario.innerHTML = '<i class="fas fa-edit"></i> Editar Comentario';
+    })
+    .catch(error => {
+        alert(`Error al guardar el comentario: ${error.message}`);
+    });
 }
 </script>
 
