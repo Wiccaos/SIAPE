@@ -7,11 +7,12 @@ from django.contrib.auth import logout, login
 from django.contrib.auth import update_session_auth_hash
 from django.utils import timezone
 from django.urls import reverse
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from datetime import timedelta, datetime, time, date
+from collections import Counter
 from django.db.models import Count, Q
 from django.views.decorators.http import require_POST
-from django.views.decorators.csrf import ensure_csrf_cookie
+from django.views.decorators.csrf import csrf_exempt
 from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 import json
 import calendar  # Importar para el calendario mensual
@@ -21,13 +22,17 @@ import csv
 from io import BytesIO
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, A4
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak, Image
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
+import matplotlib
+matplotlib.use('Agg')  # Usar backend sin GUI
+import matplotlib.pyplot as plt
+import os
 
 # Django REST Framework
 from rest_framework import viewsets, mixins, status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.views import APIView
@@ -43,7 +48,7 @@ from .serializer import (
 from .validators import validar_rut_chileno, validar_contraseña, traducir_feriado_chileno
 from .models import(
     Usuario, PerfilUsuario, Roles, Areas, CategoriasAjustes, Carreras, Estudiantes, Solicitudes, Evidencias,
-    Asignaturas, AsignaturasEnCurso, Entrevistas, AjusteRazonable, AjusteAsignado, HorarioBloqueado, Notificacion
+    Asignaturas, AsignaturasEnCurso, Entrevistas, AjusteRazonable, AjusteAsignado, HorarioBloqueado, DecisionDocenteAjuste, SEMESTRE_CHOICES
 )  
 
 # Permisos personalizados
@@ -5085,6 +5090,13 @@ def dashboard_director(request):
     
     # Si no tiene carreras asignadas, mostrar mensaje y retornar lista vacía
     if not carreras_del_director.exists():
+        # Determinar semestre actual para mostrar en los KPIs
+        mes_actual = timezone.localtime(timezone.now()).month
+        if mes_actual >= 3 and mes_actual <= 8:
+            semestre_actual = 1
+        else:
+            semestre_actual = 2
+        
         messages.warning(request, 'No tienes carreras asignadas. Contacta a un administrador para que te asigne carreras.')
         context = {
             'nombre_usuario': request.user.first_name,
@@ -5094,12 +5106,22 @@ def dashboard_director(request):
                 'total_pendientes': 0,
                 'total_aprobados': 0,
                 'total_rechazados': 0,
+                'semestre_actual': semestre_actual,
             },
         }
         return render(request, 'SIAPE/dashboard_director.html', context)
     
     # Obtener IDs de las carreras para hacer el filtro más eficiente
     carreras_ids = carreras_del_director.values_list('id', flat=True)
+    
+    # 1.5. Determinar el semestre actual basado en la fecha
+    # Semestre 1: Marzo - Agosto (meses 3-8)
+    # Semestre 2: Septiembre - Febrero (meses 9-12, 1-2)
+    mes_actual = timezone.localtime(timezone.now()).month
+    if mes_actual >= 3 and mes_actual <= 8:
+        semestre_actual = 1
+    else:
+        semestre_actual = 2
     
     # 2. Base de solicitudes de sus carreras - usando IDs para mejor rendimiento
     solicitudes_base = Solicitudes.objects.filter(
@@ -5108,6 +5130,11 @@ def dashboard_director(request):
         'estudiantes', 
         'estudiantes__carreras'
     ).distinct()
+    
+    # 2.5. Filtrar solicitudes por semestre actual del estudiante
+    solicitudes_base_semestre = solicitudes_base.filter(
+        estudiantes__semestre_actual=semestre_actual
+    )
 
     # 3. Filtrar solicitudes PENDIENTES (estado 'pendiente_aprobacion')
     # Estos son los casos que el Asesor Pedagógico le envió.
@@ -5116,16 +5143,27 @@ def dashboard_director(request):
     ).order_by('updated_at') # Más antiguas (recién llegadas) primero
 
     # 4. Filtrar el HISTORIAL (casos 'aprobados' o 'rechazados')
-    solicitudes_historial = solicitudes_base.filter(
+    solicitudes_historial_base = solicitudes_base.filter(
         estado__in=['aprobado', 'rechazado']
     ).order_by('-updated_at') # Más recientes primero
 
-    # 5. KPIs (Específicos del Director)
+    # 5. KPIs (Específicos del Director) - filtrar por semestre actual
     kpis = {
-        'total_pendientes': solicitudes_pendientes.count(),
-        'total_aprobados': solicitudes_historial.filter(estado='aprobado').count(),
-        'total_rechazados': solicitudes_historial.filter(estado='rechazado').count(),
+        'total_pendientes': solicitudes_base_semestre.filter(estado='pendiente_aprobacion').count(),
+        'total_aprobados': solicitudes_base_semestre.filter(estado='aprobado').count(),
+        'total_rechazados': solicitudes_base_semestre.filter(estado='rechazado').count(),
+        'semestre_actual': semestre_actual,
     }
+
+    # 6. Paginación del historial (10 por página)
+    page_historial = request.GET.get('page_historial', 1)
+    paginator_historial = Paginator(solicitudes_historial_base, 10)
+    try:
+        solicitudes_historial = paginator_historial.page(page_historial)
+    except PageNotAnInteger:
+        solicitudes_historial = paginator_historial.page(1)
+    except EmptyPage:
+        solicitudes_historial = paginator_historial.page(paginator_historial.num_pages)
 
     context = {
         'nombre_usuario': request.user.first_name,
@@ -5195,6 +5233,67 @@ def estudiantes_por_carrera_director(request, carrera_id):
     }
     # 3. Renderizar un nuevo template que crearemos a continuación
     return render(request, 'SIAPE/estudiantes_carrera_director.html', context)
+
+@login_required
+def perfil_estudiante_director(request, estudiante_id):
+    """
+    Muestra el perfil completo de un estudiante con sus solicitudes
+    para el Director de Carrera.
+    """
+    try:
+        perfil_director = request.user.perfil
+        if perfil_director.rol.nombre_rol != ROL_DIRECTOR:
+            messages.error(request, 'No tienes permisos para esta acción.')
+            return redirect('home')
+    except AttributeError:
+        return redirect('home')
+
+    # 1. Obtener el estudiante
+    estudiante = get_object_or_404(Estudiantes, id=estudiante_id)
+    
+    # 2. Verificar que el director tenga acceso a la carrera del estudiante
+    carreras_del_director = Carreras.objects.filter(director=perfil_director)
+    if estudiante.carreras not in carreras_del_director:
+        messages.error(request, 'No tienes permisos para ver este estudiante.')
+        return redirect('carreras_director')
+    
+    # 3. Obtener todas las solicitudes del estudiante ordenadas por fecha (más recientes primero)
+    solicitudes = Solicitudes.objects.filter(
+        estudiantes=estudiante
+    ).select_related(
+        'estudiantes',
+        'estudiantes__carreras',
+        'coordinadora_asignada',
+        'coordinador_tecnico_pedagogico_asignado',
+        'asesor_pedagogico_asignado'
+    ).prefetch_related(
+        'ajusteasignado_set',
+        'ajusteasignado_set__ajuste_razonable',
+        'ajusteasignado_set__ajuste_razonable__categorias_ajustes'
+    ).order_by('-created_at')
+    
+    # 4. Estadísticas del estudiante
+    total_solicitudes = solicitudes.count()
+    solicitudes_aprobadas = solicitudes.filter(estado='aprobado').count()
+    solicitudes_rechazadas = solicitudes.filter(estado='rechazado').count()
+    solicitudes_pendientes = solicitudes.exclude(estado__in=['aprobado', 'rechazado']).count()
+    
+    # 5. Obtener asignaturas en curso del estudiante
+    asignaturas_en_curso = estudiante.asignaturasencurso_set.filter(estado=True).select_related('asignaturas')
+    
+    context = {
+        'estudiante': estudiante,
+        'solicitudes': solicitudes,
+        'total_solicitudes': total_solicitudes,
+        'solicitudes_aprobadas': solicitudes_aprobadas,
+        'solicitudes_rechazadas': solicitudes_rechazadas,
+        'solicitudes_pendientes': solicitudes_pendientes,
+        'asignaturas_en_curso': asignaturas_en_curso,
+        'nombre_usuario': request.user.first_name,
+        'carrera': estudiante.carreras,
+    }
+    
+    return render(request, 'SIAPE/perfil_estudiante_director.html', context)
 
 @login_required
 def estadisticas_director(request):
@@ -5278,13 +5377,14 @@ def estadisticas_director(request):
     ).distinct()
     
     # Base de ajustes de sus carreras
+    # No usar distinct() ya que cada AjusteAsignado es único y no debería haber duplicados
     ajustes_base = AjusteAsignado.objects.filter(
         solicitudes__estudiantes__carreras__id__in=carreras_ids
     ).select_related(
         'solicitudes',
         'solicitudes__estudiantes',
         'solicitudes__estudiantes__carreras'
-    ).distinct()
+    )
     
     # Aplicar filtro de tiempo (si está definido)
     if fecha_inicio_dt:
@@ -5337,65 +5437,186 @@ def estadisticas_director(request):
         }]
     }
 
-    # 7. --- Gráfico 2: Tipos de Apoyo por Categoría ---
-    tipos_ajustes = ajustes_base.filter(estado_aprobacion='aprobado').values(
-        'ajuste_razonable__categorias_ajustes__nombre_categoria'
-    ).annotate(total=Count('id')).order_by('-total')[:10]  # Top 10
-
-    bar_labels_tipos = [d['ajuste_razonable__categorias_ajustes__nombre_categoria'] or 'Sin categoría' for d in tipos_ajustes]
-    bar_data_tipos = [d['total'] for d in tipos_ajustes]
-
+    # 7. --- Gráfico 2: Ajustes Aprobados y Rechazados por Categoría ---
+    # Obtener todos los ajustes (aprobados y rechazados) con sus categorías
+    ajustes_por_categoria_qs = ajustes_base.filter(
+        estado_aprobacion__in=['aprobado', 'rechazado']
+    ).select_related(
+        'ajuste_razonable',
+        'ajuste_razonable__categorias_ajustes'
+    )
+    
+    # Convertir a lista para procesar
+    ajustes_por_categoria_lista = list(ajustes_por_categoria_qs)
+    
+    # Procesar: agrupar por categoría y estado
+    categorias_estados = {}  # {categoria: {'aprobado': count, 'rechazado': count}}
+    
+    for ajuste in ajustes_por_categoria_lista:
+        if ajuste.ajuste_razonable and ajuste.ajuste_razonable.categorias_ajustes:
+            categoria_nombre = ajuste.ajuste_razonable.categorias_ajustes.nombre_categoria
+        else:
+            categoria_nombre = 'Sin categoría'
+        
+        estado = ajuste.estado_aprobacion
+        
+        if categoria_nombre not in categorias_estados:
+            categorias_estados[categoria_nombre] = {'aprobado': 0, 'rechazado': 0}
+        
+        if estado == 'aprobado':
+            categorias_estados[categoria_nombre]['aprobado'] += 1
+        elif estado == 'rechazado':
+            categorias_estados[categoria_nombre]['rechazado'] += 1
+    
+    # Ordenar por total de ajustes (aprobados + rechazados) descendente
+    categorias_ordenadas = sorted(
+        categorias_estados.items(),
+        key=lambda x: x[1]['aprobado'] + x[1]['rechazado'],
+        reverse=True
+    )
+    
+    # Limitar a las primeras 15 categorías si hay muchas
+    if len(categorias_ordenadas) > 15:
+        categorias_ordenadas = categorias_ordenadas[:15]
+    
+    # Preparar datos para el gráfico de barras agrupadas
+    bar_labels_categorias = [item[0] for item in categorias_ordenadas]
+    bar_data_aprobados = [item[1]['aprobado'] for item in categorias_ordenadas]
+    bar_data_rechazados = [item[1]['rechazado'] for item in categorias_ordenadas]
+    
     bar_chart_tipos = {
-        'labels': bar_labels_tipos,
-        'datasets': [{
-            'label': 'Ajustes Aprobados por Categoría',
-            'data': bar_data_tipos,
-            'backgroundColor': 'rgba(211, 47, 47, 0.7)',  # Rojo INACAP
-        }]
+        'labels': bar_labels_categorias,
+        'datasets': [
+            {
+                'label': 'Aprobados',
+                'data': bar_data_aprobados,
+                'backgroundColor': 'rgba(40, 167, 69, 0.7)',  # Verde
+            },
+            {
+                'label': 'Rechazados',
+                'data': bar_data_rechazados,
+                'backgroundColor': 'rgba(220, 53, 69, 0.7)',  # Rojo
+            }
+        ]
     }
 
-    # 8. --- Gráfico 3: Secciones con Más Ajustes (Top 5) ---
-    secciones_data = ajustes_base.filter(estado_aprobacion='aprobado').values(
-        'solicitudes__asignaturas_solicitadas__nombre',
-        'solicitudes__asignaturas_solicitadas__seccion'
-    ).annotate(total=Count('id')).order_by('-total')[:5]
+    # 8. --- Gráfico 3: Secciones con Más Ajustes Aprobados ---
+    # Obtener solo ajustes aprobados para las secciones
+    # Usar asignaturas_en_curso a través del estudiante en lugar del ManyToMany
+    ajustes_aprobados_secciones_qs = ajustes_base.filter(
+        estado_aprobacion='aprobado'
+    ).select_related(
+        'solicitudes',
+        'solicitudes__estudiantes',
+        'solicitudes__estudiantes__carreras'
+    )
 
-    bar_labels_secciones = []
-    bar_data_secciones = []
-    for d in secciones_data:
-        nombre = d['solicitudes__asignaturas_solicitadas__nombre'] or 'Sin asignatura'
-        seccion = d['solicitudes__asignaturas_solicitadas__seccion'] or ''
-        bar_labels_secciones.append(f"{nombre} ({seccion})" if seccion else nombre)
-        bar_data_secciones.append(d['total'])
+    # Convertir a lista para procesar
+    ajustes_aprobados_secciones_lista = list(ajustes_aprobados_secciones_qs)
+
+    # Pre-cargar todas las asignaturas_en_curso relacionadas para optimizar
+    from SIAPE.models import AsignaturasEnCurso
+
+    estudiantes_ids = [ajuste.solicitudes.estudiantes_id for ajuste in ajustes_aprobados_secciones_lista]
+    asignaturas_en_curso_dict = {}
+
+    if estudiantes_ids:
+        asignaturas_en_curso_lista = AsignaturasEnCurso.objects.filter(
+            estudiantes_id__in=estudiantes_ids,
+            estado=True  # Solo asignaturas activas
+        ).select_related('asignaturas')
+        
+        # Organizar por estudiante_id para acceso rápido
+        for aec in asignaturas_en_curso_lista:
+            estudiante_id = aec.estudiantes_id
+            if estudiante_id not in asignaturas_en_curso_dict:
+                asignaturas_en_curso_dict[estudiante_id] = []
+            asignaturas_en_curso_dict[estudiante_id].append(aec.asignaturas)
+
+    # Contar ajustes por sección (asignatura + sección)
+    secciones_counter = Counter()
+
+    for ajuste in ajustes_aprobados_secciones_lista:
+        solicitud = ajuste.solicitudes
+        estudiante_id = solicitud.estudiantes_id
+        
+        # Obtener asignaturas a través de asignaturas_en_curso del estudiante
+        asignaturas = asignaturas_en_curso_dict.get(estudiante_id, [])
+        
+        if asignaturas:
+            for asignatura in asignaturas:
+                # Crear clave única: "Nombre Asignatura (Sección)"
+                if asignatura.seccion:
+                    clave = f"{asignatura.nombre} ({asignatura.seccion})"
+                else:
+                    clave = f"{asignatura.nombre} (Sin sección)"
+                secciones_counter[clave] += 1
+        else:
+            # Si no hay asignaturas, contar como "Sin asignatura"
+            secciones_counter["Sin asignatura"] += 1
+
+    # Obtener las secciones más frecuentes (top 15)
+    top_secciones = secciones_counter.most_common(15)
+
+    # Ordenar por cantidad descendente (most_common ya lo hace, pero asegurémonos)
+    top_secciones.sort(key=lambda x: x[1], reverse=True)
+
+    bar_labels_secciones = [item[0] for item in top_secciones]
+    bar_data_secciones = [item[1] for item in top_secciones]
 
     bar_chart_secciones = {
         'labels': bar_labels_secciones,
         'datasets': [{
-            'label': 'Ajustes Aprobados por Sección (Top 5)',
+            'label': 'Ajustes Aprobados',
             'data': bar_data_secciones,
-            'backgroundColor': 'rgba(211, 47, 47, 0.7)',  # Rojo INACAP
+            'backgroundColor': 'rgba(40, 167, 69, 0.7)',  # Verde para aprobados
         }]
     }
 
     # 9. --- Gráfico 4: Tendencia de Casos por Tiempo ---
+    # IMPORTANTE: Usar solicitudes_base que ya tiene el filtro de tiempo aplicado
     casos_por_tiempo = []
     if rango_seleccionado == 'mes':
-        # Por día
+        # Por día - solo mostrar días dentro del rango seleccionado
+        if fecha_inicio_dt:
+            fecha_inicio_calc = fecha_inicio_dt.date()
+        else:
+            # Si es histórico, usar la fecha del primer caso
+            primer_caso = solicitudes_base.order_by('created_at').first()
+            if primer_caso:
+                fecha_inicio_calc = primer_caso.created_at.date()
+            else:
+                fecha_inicio_calc = today - timedelta(days=30)
+        
         for i in range(29, -1, -1):
             fecha_dia = today - timedelta(days=i)
+            # Solo incluir días dentro del rango seleccionado
+            if fecha_inicio_dt and fecha_dia < fecha_inicio_calc:
+                continue
             dia_inicio_dt = timezone.make_aware(datetime.combine(fecha_dia, datetime.min.time()))
             dia_fin_dt = timezone.make_aware(datetime.combine(fecha_dia, datetime.max.time()))
-            # Usar la base sin filtro de tiempo para cada día específico
-            cantidad = Solicitudes.objects.filter(
-                estudiantes__carreras__id__in=carreras_ids,
+            # Usar solicitudes_base filtrado y aplicar filtro adicional por día
+            cantidad = solicitudes_base.filter(
                 created_at__range=(dia_inicio_dt, dia_fin_dt)
             ).distinct().count()
             casos_por_tiempo.append({'fecha': fecha_dia.strftime('%d/%m'), 'cantidad': cantidad})
     elif rango_seleccionado == 'semestre':
-        # Por mes
+        # Por mes - usar solicitudes_base que ya tiene el filtro de tiempo aplicado
+        if fecha_inicio_dt:
+            fecha_inicio_calc = fecha_inicio_dt.date()
+        else:
+            primer_caso = solicitudes_base.order_by('created_at').first()
+            if primer_caso:
+                fecha_inicio_calc = primer_caso.created_at.date()
+            else:
+                fecha_inicio_calc = today - timedelta(days=180)
+        
         for i in range(5, -1, -1):
             fecha_mes = today - timedelta(days=30 * i)
             mes_inicio = fecha_mes.replace(day=1)
+            # Solo incluir meses dentro del rango seleccionado
+            if fecha_inicio_dt and mes_inicio < fecha_inicio_calc:
+                continue
             if i == 0:
                 mes_fin = today
             else:
@@ -5403,16 +5624,28 @@ def estadisticas_director(request):
                 mes_fin = siguiente_mes.replace(day=1) - timedelta(days=1)
             mes_inicio_dt = timezone.make_aware(datetime.combine(mes_inicio, datetime.min.time()))
             mes_fin_dt = timezone.make_aware(datetime.combine(mes_fin, datetime.max.time()))
-            cantidad = Solicitudes.objects.filter(
-                estudiantes__carreras__id__in=carreras_ids,
+            # Usar solicitudes_base filtrado y aplicar filtro adicional por mes
+            cantidad = solicitudes_base.filter(
                 created_at__range=(mes_inicio_dt, mes_fin_dt)
             ).distinct().count()
             casos_por_tiempo.append({'fecha': mes_inicio.strftime('%b %Y'), 'cantidad': cantidad})
     elif rango_seleccionado == 'año':
-        # Por mes
+        # Por mes - usar solicitudes_base que ya tiene el filtro de tiempo aplicado
+        if fecha_inicio_dt:
+            fecha_inicio_calc = fecha_inicio_dt.date()
+        else:
+            primer_caso = solicitudes_base.order_by('created_at').first()
+            if primer_caso:
+                fecha_inicio_calc = primer_caso.created_at.date()
+            else:
+                fecha_inicio_calc = today.replace(month=1, day=1)
+        
         for i in range(11, -1, -1):
             fecha_mes = today - timedelta(days=30 * i)
             mes_inicio = fecha_mes.replace(day=1)
+            # Solo incluir meses dentro del rango seleccionado
+            if fecha_inicio_dt and mes_inicio < fecha_inicio_calc:
+                continue
             if i == 0:
                 mes_fin = today
             else:
@@ -5420,8 +5653,8 @@ def estadisticas_director(request):
                 mes_fin = siguiente_mes.replace(day=1) - timedelta(days=1)
             mes_inicio_dt = timezone.make_aware(datetime.combine(mes_inicio, datetime.min.time()))
             mes_fin_dt = timezone.make_aware(datetime.combine(mes_fin, datetime.max.time()))
-            cantidad = Solicitudes.objects.filter(
-                estudiantes__carreras__id__in=carreras_ids,
+            # Usar solicitudes_base filtrado y aplicar filtro adicional por mes
+            cantidad = solicitudes_base.filter(
                 created_at__range=(mes_inicio_dt, mes_fin_dt)
             ).distinct().count()
             casos_por_tiempo.append({'fecha': mes_inicio.strftime('%b %Y'), 'cantidad': cantidad})
@@ -5437,8 +5670,8 @@ def estadisticas_director(request):
                     año_fin_dt = timezone.make_aware(datetime.combine(today, datetime.max.time()))
                 else:
                     año_fin_dt = timezone.make_aware(datetime(año + 1, 1, 1)) - timedelta(seconds=1)
-                cantidad = Solicitudes.objects.filter(
-                    estudiantes__carreras__id__in=carreras_ids,
+                # Usar solicitudes_base (histórico completo, sin filtro de tiempo adicional)
+                cantidad = solicitudes_base.filter(
                     created_at__range=(año_inicio_dt, año_fin_dt)
                 ).distinct().count()
                 casos_por_tiempo.append({'fecha': str(año), 'cantidad': cantidad})
@@ -5715,8 +5948,32 @@ def generar_reporte_pdf_director(request):
     elements.append(Paragraph(f'Generado por: {request.user.get_full_name()}', styles['Normal']))
     elements.append(Spacer(1, 0.4*inch))
     
+    # Introducción
+    intro_text = f"""
+    Este reporte presenta un análisis completo de las estadísticas de las carreras bajo su dirección 
+    para el período: <b>{rango_nombre}</b>. El documento incluye indicadores clave de rendimiento (KPIs), 
+    análisis de casos y ajustes razonables, estadísticas por carrera, asignaturas, estudiantes y docentes.
+    """
+    intro_style = ParagraphStyle(
+        'IntroStyle',
+        parent=styles['Normal'],
+        fontSize=10,
+        leading=14,
+        spaceAfter=15,
+        alignment=4,  # Justificado
+    )
+    elements.append(Paragraph(intro_text, intro_style))
+    elements.append(Spacer(1, 0.2*inch))
+    
     # KPIs Principales
     elements.append(Paragraph('Indicadores Principales', heading_style))
+    kpi_text = """
+    Los siguientes indicadores proporcionan una visión general del estado de las solicitudes de ajustes 
+    razonables en sus carreras. Estos datos reflejan el total de casos gestionados, su estado de aprobación 
+    y la distribución de ajustes asignados.
+    """
+    elements.append(Paragraph(kpi_text, intro_style))
+    elements.append(Spacer(1, 0.1*inch))
     kpi_data = [
         ['Indicador', 'Valor'],
         ['Total Casos', str(total_casos)],
@@ -5774,10 +6031,84 @@ def generar_reporte_pdf_director(request):
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [color_blanco, color_gris_claro]),
     ]))
     elements.append(estado_table)
-    elements.append(Spacer(1, 0.3*inch))
+    elements.append(Spacer(1, 0.2*inch))
+    
+    # Gráfico de Casos por Estado (Gráfico de pastel mejorado)
+    try:
+        estado_counts = {}
+        estado_labels_short = {}
+        for estado_valor, estado_nombre in Solicitudes.ESTADO_CHOICES:
+            cantidad = solicitudes_base.filter(estado=estado_valor).count()
+            if cantidad > 0:
+                estado_counts[estado_nombre] = cantidad
+                # Acortar etiquetas largas para mejor visualización
+                if len(estado_nombre) > 30:
+                    estado_labels_short[estado_nombre] = estado_nombre[:27] + '...'
+                else:
+                    estado_labels_short[estado_nombre] = estado_nombre
+        
+        if estado_counts:
+            fig, ax = plt.subplots(figsize=(8, 6))
+            colors_pie = ['#4CAF50', '#FF9800', '#f44336', '#2196F3', '#9E9E9E', '#FFC107', '#00BCD4']
+            
+            # Ordenar por cantidad descendente para mejor visualización
+            sorted_estados = sorted(estado_counts.items(), key=lambda x: x[1], reverse=True)
+            valores = [v for _, v in sorted_estados]
+            etiquetas = [estado_labels_short[k] for k, _ in sorted_estados]
+            
+            wedges, texts, autotexts = ax.pie(
+                valores,
+                labels=etiquetas,
+                autopct=lambda pct: f'{pct:.1f}%\n({int(pct/100*sum(valores))})' if pct > 3 else '',
+                colors=colors_pie[:len(valores)],
+                startangle=90,
+                textprops={'fontsize': 8, 'fontweight': 'bold'},
+                pctdistance=0.85,
+                labeldistance=1.1
+            )
+            
+            # Mejorar la legibilidad de los textos
+            for autotext in autotexts:
+                autotext.set_color('white')
+                autotext.set_fontweight('bold')
+                autotext.set_fontsize(9)
+            
+            for text in texts:
+                text.set_fontsize(8)
+            
+            ax.set_title('Distribución de Casos por Estado', fontsize=12, fontweight='bold', pad=20)
+            
+            # Agregar leyenda fuera del gráfico
+            ax.legend(wedges, [f'{k}: {v}' for k, v in sorted_estados], 
+                     loc='center left', bbox_to_anchor=(1, 0, 0.5, 1), fontsize=8)
+            
+            plt.tight_layout()
+            # Usar BytesIO en lugar de archivo temporal para evitar problemas de permisos
+            img_buffer = BytesIO()
+            plt.savefig(img_buffer, format='png', dpi=200, bbox_inches='tight', facecolor='white')
+            plt.close()
+            img_buffer.seek(0)
+            
+            # Leer el contenido del buffer antes de crear la imagen
+            img_data = img_buffer.getvalue()
+            img_buffer.close()
+            
+            # Crear la imagen desde los bytes en memoria
+            img = Image(BytesIO(img_data), width=7*inch, height=5.25*inch)
+            elements.append(img)
+            elements.append(Spacer(1, 0.2*inch))
+    except Exception as e:
+        pass
     
     # Estadísticas por Carrera
     elements.append(Paragraph('Estadísticas por Carrera', heading_style))
+    carrera_text = """
+    El análisis por carrera permite identificar qué programas académicos presentan mayor demanda de ajustes 
+    razonables y su tasa de aprobación. Esta información es valiosa para la planificación académica y la 
+    asignación de recursos.
+    """
+    elements.append(Paragraph(carrera_text, intro_style))
+    elements.append(Spacer(1, 0.1*inch))
     carrera_data = [['Carrera', 'Total Casos', 'Aprobados', 'Tasa Aprobación']]
     for carrera in carreras_del_director:
         casos_carrera = solicitudes_base.filter(estudiantes__carreras=carrera)
@@ -5801,10 +6132,63 @@ def generar_reporte_pdf_director(request):
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [color_blanco, color_gris_claro]),
     ]))
     elements.append(carrera_table)
-    elements.append(Spacer(1, 0.3*inch))
+    elements.append(Spacer(1, 0.2*inch))
+    
+    # Gráfico de Tasa de Aprobación por Carrera
+    try:
+        carrera_names = []
+        tasa_aprobaciones = []
+        for carrera in carreras_del_director:
+            casos_carrera = solicitudes_base.filter(estudiantes__carreras=carrera)
+            total_carrera = casos_carrera.count()
+            if total_carrera > 0:
+                aprobados_carrera = casos_carrera.filter(estado='aprobado').count()
+                tasa_carrera = round((aprobados_carrera / total_carrera * 100), 1)
+                carrera_names.append(carrera.nombre[:20])
+                tasa_aprobaciones.append(tasa_carrera)
+        
+        if carrera_names:
+            fig, ax = plt.subplots(figsize=(8, 5))
+            bars = ax.barh(carrera_names, tasa_aprobaciones, color='#D32F2F', edgecolor='black', linewidth=1)
+            ax.set_xlabel('Tasa de Aprobación (%)', fontsize=10, fontweight='bold')
+            ax.set_title('Tasa de Aprobación por Carrera', fontsize=11, fontweight='bold', pad=15)
+            ax.set_xlim(0, 100)
+            ax.grid(axis='x', alpha=0.3, linestyle='--')
+            
+            # Agregar valores en las barras
+            for i, bar in enumerate(bars):
+                width = bar.get_width()
+                ax.text(width, bar.get_y() + bar.get_height()/2.,
+                       f'{width}%',
+                       ha='left', va='center', fontsize=9, fontweight='bold', pad=5)
+            
+            plt.tight_layout()
+            # Usar BytesIO en lugar de archivo temporal para evitar problemas de permisos
+            img_buffer = BytesIO()
+            plt.savefig(img_buffer, format='png', dpi=150, bbox_inches='tight')
+            plt.close()
+            img_buffer.seek(0)
+            
+            # Leer el contenido del buffer antes de crear la imagen
+            img_data = img_buffer.getvalue()
+            img_buffer.close()
+            
+            # Crear la imagen desde los bytes en memoria
+            img = Image(BytesIO(img_data), width=6*inch, height=3.75*inch)
+            elements.append(img)
+            elements.append(Spacer(1, 0.2*inch))
+    except Exception as e:
+        pass
     
     # Estadísticas de Asignaturas
     elements.append(Paragraph('Estadísticas de Asignaturas', heading_style))
+    asignaturas_text = """
+    Esta sección detalla las asignaturas ofrecidas en sus carreras, incluyendo información sobre docentes 
+    asignados, estado de las asignaturas y distribución por semestre. Los datos ayudan a comprender la 
+    estructura académica y la carga docente.
+    """
+    elements.append(Paragraph(asignaturas_text, intro_style))
+    elements.append(Spacer(1, 0.1*inch))
     asignaturas_data = [['Asignatura', 'Sección', 'Carrera', 'Docente', 'Estado', 'Semestre']]
     for asignatura in asignaturas_base.select_related('carreras', 'docente__usuario')[:50]:  # Top 50
         docente_nombre = f"{asignatura.docente.usuario.first_name} {asignatura.docente.usuario.last_name}" if asignatura.docente else "Sin docente"
@@ -5841,7 +6225,7 @@ def generar_reporte_pdf_director(request):
         elements.append(Paragraph('Asignaturas por Semestre', heading_style))
         semestre_data = [['Semestre', 'Año', 'Total']]
         for item in asignaturas_por_semestre:
-            semestre_nombre = dict(Asignaturas.SEMESTRE_CHOICES).get(item['semestre'], item['semestre']) if item['semestre'] else "Sin semestre"
+            semestre_nombre = dict(SEMESTRE_CHOICES).get(item['semestre'], item['semestre']) if item['semestre'] else "Sin semestre"
             semestre_data.append([semestre_nombre, str(item['anio']) if item['anio'] else "N/A", str(item['total'])])
         
         semestre_table = Table(semestre_data, colWidths=[2*inch, 1.5*inch, 1.5*inch])
@@ -5892,7 +6276,56 @@ def generar_reporte_pdf_director(request):
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [color_blanco, color_gris_claro]),
     ]))
     elements.append(estudiantes_table)
-    elements.append(Spacer(1, 0.3*inch))
+    elements.append(Spacer(1, 0.2*inch))
+    
+    # Gráfico de Estudiantes con Ajustes por Carrera
+    try:
+        carrera_est_names = []
+        porcentajes_ajustes = []
+        for carrera in carreras_del_director:
+            estudiantes_carrera = estudiantes_base.filter(carreras=carrera)
+            total_est_carrera = estudiantes_carrera.count()
+            if total_est_carrera > 0:
+                con_ajustes_carrera = estudiantes_carrera.filter(
+                    solicitudes__in=solicitudes_base
+                ).distinct().count()
+                porcentaje_ajustes = round((con_ajustes_carrera / total_est_carrera * 100), 1)
+                carrera_est_names.append(carrera.nombre[:20])
+                porcentajes_ajustes.append(porcentaje_ajustes)
+        
+        if carrera_est_names:
+            fig, ax = plt.subplots(figsize=(8, 5))
+            bars = ax.bar(carrera_est_names, porcentajes_ajustes, color='#2196F3', edgecolor='black', linewidth=1)
+            ax.set_ylabel('Porcentaje de Estudiantes (%)', fontsize=10, fontweight='bold')
+            ax.set_title('Porcentaje de Estudiantes con Ajustes por Carrera', fontsize=11, fontweight='bold', pad=15)
+            ax.set_ylim(0, max(porcentajes_ajustes) * 1.2 if porcentajes_ajustes else 100)
+            ax.grid(axis='y', alpha=0.3, linestyle='--')
+            plt.xticks(rotation=45, ha='right')
+            
+            # Agregar valores en las barras
+            for bar in bars:
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height,
+                       f'{height}%',
+                       ha='center', va='bottom', fontsize=9, fontweight='bold')
+            
+            plt.tight_layout()
+            # Usar BytesIO en lugar de archivo temporal para evitar problemas de permisos
+            img_buffer = BytesIO()
+            plt.savefig(img_buffer, format='png', dpi=150, bbox_inches='tight')
+            plt.close()
+            img_buffer.seek(0)
+            
+            # Leer el contenido del buffer antes de crear la imagen
+            img_data = img_buffer.getvalue()
+            img_buffer.close()
+            
+            # Crear la imagen desde los bytes en memoria
+            img = Image(BytesIO(img_data), width=6*inch, height=3.75*inch)
+            elements.append(img)
+            elements.append(Spacer(1, 0.2*inch))
+    except Exception as e:
+        pass
     
     # Estudiantes por Semestre
     if estudiantes_por_semestre:
@@ -5920,6 +6353,13 @@ def generar_reporte_pdf_director(request):
     
     # Estadísticas de Docentes
     elements.append(Paragraph('Estadísticas de Docentes', heading_style))
+    docentes_text = """
+    El análisis de docentes muestra la participación del cuerpo académico en el proceso de ajustes razonables. 
+    Se incluye información sobre asignaturas asignadas, ajustes aprobados y rechazados, así como comentarios 
+    realizados por los docentes durante el proceso de evaluación.
+    """
+    elements.append(Paragraph(docentes_text, intro_style))
+    elements.append(Spacer(1, 0.1*inch))
     docentes_data = [['Docente', 'Total Asignaturas', 'Ajustes Aprobados', 'Ajustes Rechazados', 'Comentarios']]
     
     # Combinar datos de docentes
@@ -5975,7 +6415,44 @@ def generar_reporte_pdf_director(request):
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [color_blanco, color_gris_claro]),
     ]))
     elements.append(docentes_table)
-    elements.append(Spacer(1, 0.3*inch))
+    elements.append(Spacer(1, 0.2*inch))
+    
+    # Gráfico de Ajustes por Docente (Top 10)
+    try:
+        docentes_top = sorted(docentes_dict.items(), key=lambda x: x[1]['aprobados'] + x[1]['rechazados'], reverse=True)[:10]
+        if docentes_top:
+            docentes_nombres = [d[0][:15] for d in docentes_top]
+            aprobados_data = [d[1]['aprobados'] for d in docentes_top]
+            rechazados_data = [d[1]['rechazados'] for d in docentes_top]
+            
+            fig, ax = plt.subplots(figsize=(10, 6))
+            x = range(len(docentes_nombres))
+            width = 0.35
+            bars1 = ax.bar([i - width/2 for i in x], aprobados_data, width, label='Aprobados', color='#4CAF50', edgecolor='black')
+            bars2 = ax.bar([i + width/2 for i in x], rechazados_data, width, label='Rechazados', color='#f44336', edgecolor='black')
+            ax.set_ylabel('Cantidad de Ajustes', fontsize=10, fontweight='bold')
+            ax.set_title('Top 10 Docentes: Ajustes Aprobados vs Rechazados', fontsize=11, fontweight='bold', pad=15)
+            ax.set_xticks(x)
+            ax.set_xticklabels(docentes_nombres, rotation=45, ha='right')
+            ax.legend(fontsize=9)
+            ax.grid(axis='y', alpha=0.3, linestyle='--')
+            plt.tight_layout()
+            # Usar BytesIO en lugar de archivo temporal para evitar problemas de permisos
+            img_buffer = BytesIO()
+            plt.savefig(img_buffer, format='png', dpi=150, bbox_inches='tight')
+            plt.close()
+            img_buffer.seek(0)
+            
+            # Leer el contenido del buffer antes de crear la imagen
+            img_data = img_buffer.getvalue()
+            img_buffer.close()
+            
+            # Crear la imagen desde los bytes en memoria
+            img = Image(BytesIO(img_data), width=7*inch, height=4.2*inch)
+            elements.append(img)
+            elements.append(Spacer(1, 0.2*inch))
+    except Exception as e:
+        pass
     
     # Inscripciones por Asignatura (Top 20)
     if inscripciones_por_asignatura:
@@ -6003,6 +6480,39 @@ def generar_reporte_pdf_director(request):
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [color_blanco, color_gris_claro]),
         ]))
         elements.append(inscripciones_table)
+        elements.append(Spacer(1, 0.2*inch))
+    
+    # Conclusión
+    elements.append(PageBreak())
+    elements.append(Paragraph('Conclusiones y Recomendaciones', heading_style))
+    conclusion_text = f"""
+    <b>Resumen Ejecutivo:</b><br/><br/>
+    
+    Durante el período analizado ({rango_nombre}), se registraron <b>{total_casos}</b> casos de solicitudes de ajustes 
+    razonables en las carreras bajo su dirección. De estos, <b>{casos_aprobados}</b> fueron aprobados, lo que representa 
+    una tasa de aprobación del <b>{tasa_aprobacion}%</b>.<br/><br/>
+    
+    Se asignaron un total de <b>{total_ajustes}</b> ajustes razonables, de los cuales <b>{ajustes_aprobados}</b> fueron 
+    aprobados y <b>{ajustes_rechazados}</b> fueron rechazados. Actualmente hay <b>{ajustes_pendientes}</b> ajustes en 
+    estado pendiente de evaluación.<br/><br/>
+    
+    <b>Recomendaciones:</b><br/>
+    • Continuar monitoreando la tasa de aprobación para identificar tendencias.<br/>
+    • Revisar los casos pendientes para agilizar el proceso de evaluación.<br/>
+    • Analizar las carreras con mayor demanda de ajustes para identificar necesidades específicas.<br/>
+    • Mantener comunicación fluida con docentes para la implementación efectiva de los ajustes aprobados.<br/><br/>
+    
+    Este reporte fue generado el {timezone.now().strftime("%d de %B de %Y a las %H:%M")} horas.
+    """
+    conclusion_style = ParagraphStyle(
+        'ConclusionStyle',
+        parent=styles['Normal'],
+        fontSize=10,
+        leading=14,
+        spaceAfter=15,
+        alignment=4,  # Justificado
+    )
+    elements.append(Paragraph(conclusion_text, conclusion_style))
     
     # Construir el PDF
     doc.build(elements)
@@ -7541,6 +8051,7 @@ def estadisticas_ajustes_coordinador_tecnico(request):
 
 
 @api_view(['GET'])
+@authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
 def obtener_datos_caso_docente(request, solicitud_id):
     """
@@ -7568,18 +8079,23 @@ def obtener_datos_caso_docente(request, solicitud_id):
     ajustes_asignados = AjusteAsignado.objects.filter(
         solicitudes=solicitud,
         estado_aprobacion='aprobado'
-    ).select_related('ajuste_razonable__categorias_ajustes', 'docente_comentador__usuario')
+    ).select_related('ajuste_razonable__categorias_ajustes').prefetch_related('decisiones_docente__docente__usuario')
     
     ajustes_data = []
     for ajuste in ajustes_asignados:
+        # Obtener la decisión del docente actual para este ajuste
+        decision_docente = ajuste.decisiones_docente.filter(docente=perfil_docente).first()
+        
         ajustes_data.append({
             'id': ajuste.id,
             'categoria': ajuste.ajuste_razonable.categorias_ajustes.nombre_categoria,
             'descripcion': ajuste.ajuste_razonable.descripcion,
             'estado_aprobacion': ajuste.estado_aprobacion,
-            'comentarios_docente': ajuste.comentarios_docente or '',
-            'fecha_comentario_docente': ajuste.fecha_comentario_docente.strftime('%d/%m/%Y %H:%M') if ajuste.fecha_comentario_docente else None,
-            'docente_comentador': ajuste.docente_comentador.usuario.get_full_name() if ajuste.docente_comentador else None
+            'decision_docente': decision_docente.decision if decision_docente else None,
+            'decision_docente_display': decision_docente.get_decision_display() if decision_docente else None,
+            'comentario_docente': decision_docente.comentario or '' if decision_docente else '',
+            'fecha_decision_docente': decision_docente.fecha_decision.strftime('%d/%m/%Y %H:%M') if decision_docente and decision_docente.fecha_decision else None,
+            'docente': decision_docente.docente.usuario.get_full_name() if decision_docente and decision_docente.docente.usuario else None
         })
     
     # Preparar respuesta
@@ -7597,62 +8113,132 @@ def obtener_datos_caso_docente(request, solicitud_id):
     
     return Response(data, status=status.HTTP_200_OK)
 
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def agregar_comentario_ajuste_docente(request, ajuste_asignado_id):
+@csrf_exempt
+@login_required
+@require_POST
+def decision_docente_ajuste(request, ajuste_asignado_id):
     """
-    Endpoint API para que el docente agregue o actualice un comentario sobre un ajuste.
+    Endpoint API para que el docente apruebe o rechace un ajuste.
+    Si rechaza, debe proporcionar un comentario obligatorio.
     """
+    # Log para debugging
+    logging.info(f'decision_docente_ajuste llamado: ajuste_id={ajuste_asignado_id}, user={request.user.id if request.user.is_authenticated else "No autenticado"}, method={request.method}')
+    
+    # Verificar autenticación
+    if not request.user.is_authenticated:
+        logging.warning(f'Usuario no autenticado intentó acceder a decision_docente_ajuste')
+        return JsonResponse({'error': 'No autenticado'}, status=401)
+    
+    # Usar EXACTAMENTE la misma validación que obtener_datos_caso_docente
     try:
         if request.user.perfil.rol.nombre_rol != ROL_DOCENTE:
-            return Response({'error': 'No autorizado'}, status=status.HTTP_403_FORBIDDEN)
+            logging.warning(f'Usuario {request.user.id} intentó tomar decisión pero no es docente')
+            return JsonResponse({'error': 'No autorizado'}, status=403)
     except AttributeError:
-        return Response({'error': 'No autorizado'}, status=status.HTTP_403_FORBIDDEN)
+        logging.warning(f'Usuario {request.user.id} no tiene perfil o rol válido')
+        return JsonResponse({'error': 'No autorizado'}, status=403)
     
     perfil_docente = request.user.perfil
     
     # Obtener el ajuste asignado
     try:
-        ajuste = AjusteAsignado.objects.get(
+        ajuste = AjusteAsignado.objects.select_related(
+            'solicitudes__estudiantes'
+        ).get(
             id=ajuste_asignado_id,
             estado_aprobacion='aprobado'
         )
     except AjusteAsignado.DoesNotExist:
-        return Response({'error': 'Ajuste no encontrado'}, status=status.HTTP_404_NOT_FOUND)
+        return JsonResponse({
+            'error': 'Ajuste no encontrado o no está aprobado',
+            'ajuste_id': ajuste_asignado_id
+        }, status=404)
     
-    # Mantener una validación mínima para evitar bloquear comentarios válidos por inconsistencias
-    # temporales de inscripción/asignaturas en la interfaz docente.
-    if not Asignaturas.objects.filter(docente=perfil_docente).exists():
-        return Response({'error': 'No autorizado'}, status=status.HTTP_403_FORBIDDEN)
+    # Verificar que el docente tiene acceso a este ajuste
+    # Usar EXACTAMENTE la misma lógica que obtener_datos_caso_docente (líneas 7987-8002)
+    mis_asignaturas = Asignaturas.objects.filter(docente=perfil_docente)
     
-    # Obtener el comentario del request
-    comentario = request.data.get('comentario', '').strip()
+    # Verificar que el estudiante está en las clases del docente
+    estudiante_en_clases = AsignaturasEnCurso.objects.filter(
+        estudiantes=ajuste.solicitudes.estudiantes,
+        asignaturas__in=mis_asignaturas
+    ).exists()
     
-    if not comentario:
-        return Response({'error': 'El comentario no puede estar vacío'}, status=status.HTTP_400_BAD_REQUEST)
-    
-    # Guardar el comentario
-    ajuste.comentarios_docente = comentario
-    ajuste.docente_comentador = perfil_docente
-    ajuste.fecha_comentario_docente = timezone.now()
-    ajuste.save()
-
-    for rol_destino in [ROL_COORDINADORA, ROL_COORDINADOR_TECNICO_PEDAGOGICO, ROL_ASESOR]:
-        crear_notificacion_rol(
-            rol_destino=rol_destino,
-            solicitud=ajuste.solicitudes,
-            tipo='comentario_docente',
-            titulo='Nuevo comentario de docente',
-            mensaje=f'{perfil_docente.usuario.get_full_name()} comentó un ajuste del caso "{ajuste.solicitudes.asunto}".'
+    if not estudiante_en_clases:
+        logging.warning(
+            f'Docente {perfil_docente.id} intentó tomar decisión sobre ajuste {ajuste_asignado_id} '
+            f'pero estudiante {ajuste.solicitudes.estudiantes.id} no está en sus asignaturas'
         )
+        return JsonResponse({'error': 'No autorizado'}, status=403)
     
-    return Response({
+    # Obtener la decisión y comentario del request (JSON)
+    try:
+        data = json.loads(request.body)
+        decision = data.get('decision', '').strip().lower()
+        comentario = data.get('comentario', '').strip()
+    except (json.JSONDecodeError, AttributeError):
+        # Fallback a POST si no es JSON
+        decision = request.POST.get('decision', '').strip().lower()
+        comentario = request.POST.get('comentario', '').strip()
+    
+    # Validar la decisión
+    if decision not in ['aprobado', 'rechazado']:
+        return JsonResponse({
+            'error': 'Decisión inválida. Debe ser "aprobado" o "rechazado".'
+        }, status=400)
+    
+    # Si rechaza, el comentario es obligatorio
+    if decision == 'rechazado' and not comentario:
+        return JsonResponse({
+            'error': 'El comentario es obligatorio cuando se rechaza un ajuste.'
+        }, status=400)
+    
+    # Guardar la decisión en la nueva tabla
+    try:
+        # Verificar si ya existe una decisión de este docente para este ajuste
+        decision_existente = DecisionDocenteAjuste.objects.filter(
+            ajuste_asignado=ajuste,
+            docente=perfil_docente
+        ).first()
+        
+        if decision_existente:
+            # Actualizar la decisión existente
+            decision_existente.decision = decision
+            decision_existente.comentario = comentario
+            decision_existente.fecha_decision = timezone.now()
+            decision_existente.save()
+            decision_obj = decision_existente
+        else:
+            # Crear nueva decisión
+            decision_obj = DecisionDocenteAjuste.objects.create(
+                ajuste_asignado=ajuste,
+                docente=perfil_docente,
+                decision=decision,
+                comentario=comentario
+            )
+        
+        # Recargar el objeto desde la base de datos
+        decision_obj.refresh_from_db()
+        
+    except Exception as e:
+        # Log del error para debugging
+        logging.error(f'Error al guardar decisión del docente: {str(e)}')
+        return JsonResponse({
+            'error': f'Error al guardar la decisión: {str(e)}'
+        }, status=500)
+    
+    # Formatear la fecha para la respuesta
+    fecha_decision_str = decision_obj.fecha_decision.strftime('%d/%m/%Y %H:%M') if decision_obj.fecha_decision else None
+    
+    return JsonResponse({
         'success': True,
-        'message': 'Comentario guardado exitosamente',
-        'comentario': ajuste.comentarios_docente,
-        'fecha_comentario': ajuste.fecha_comentario_docente.strftime('%d/%m/%Y %H:%M'),
-        'docente_comentador': perfil_docente.usuario.get_full_name()
-    }, status=status.HTTP_200_OK)
+        'message': f'Ajuste {decision_obj.get_decision_display().lower()} exitosamente',
+        'decision': decision_obj.decision,
+        'decision_display': decision_obj.get_decision_display(),
+        'comentario': decision_obj.comentario,
+        'fecha_decision': fecha_decision_str,
+        'docente': perfil_docente.usuario.get_full_name() if perfil_docente.usuario else 'Docente'
+    }, status=200)
 
 
 @require_POST

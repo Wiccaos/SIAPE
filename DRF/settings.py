@@ -175,9 +175,9 @@ if USE_S3:
     
     # Configuración de ubicación de archivos
     # Para cuentas de estudiante/Academy, usar configuración simplificada
-    AWS_DEFAULT_ACL = None  # No establecer ACL (usa permisos del bucket)
+    AWS_DEFAULT_ACL = 'public-read'  # Archivos públicos para acceso permanente sin tokens
     AWS_S3_FILE_OVERWRITE = False  # No sobrescribir archivos existentes
-    AWS_QUERYSTRING_AUTH = True  # URLs firmadas para archivos privados
+    AWS_QUERYSTRING_AUTH = False  # URLs públicas sin firma (sin expiración)
     
     # Configuración adicional para S3
     AWS_S3_VERIFY = True  # Verificar certificados SSL
@@ -281,6 +281,10 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
+    ],
+    # Configuración para manejar CSRF con SessionAuthentication
+    'DEFAULT_RENDERER_CLASSES': [
+        'rest_framework.renderers.JSONRenderer',
     ],
     # Protección contra enumeración de usuarios
     'DEFAULT_RENDERER_CLASSES': [
